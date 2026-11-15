@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+data/*
+!data/plugins.example.json
+projectos/
+*.tmp
+.codex/
+*.sql
+*.log
+*.log.err

@@ -1,0 +1,40 @@
+{
+  "name": "sneo-chat",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "dev:network": "concurrently \"npm run server\" \"npm run client:network\"",
+    "server": "node server/server.js",
+    "client": "vite --host 127.0.0.1",
+    "client:network": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "test": "node --test server/test/*.test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.8.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@toon-format/toon": "^4.1.0",
+    "@vitejs/plugin-react": "latest",
+    "concurrently": "latest",
+    "cors": "latest",
+    "dompurify": "^3.4.12",
+    "dotenv": "latest",
+    "express": "latest",
+    "mammoth": "^1.12.0",
+    "marked": "^18.0.7",
+    "monaco-editor": "^0.52.2",
+    "pdf-parse": "^2.4.5",
+    "puppeteer": "^25.17.0",
+    "qrcode": "^1.5.4",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}

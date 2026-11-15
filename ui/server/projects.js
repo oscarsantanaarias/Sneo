@@ -1,0 +1,93 @@
+import fs from 'fs/promises';
+import path from 'path';
+import { paths } from './config.js';
+import { cleanText, readProjectsData } from './storage.js';
+
+export const safeJoin = (base, target = '') => {
+  const cleanTarget = String(target || '').replace(/^[/\\]+/, '');
+  const finalPath = path.resolve(base, cleanTarget);
+
+  if(finalPath !== base && !finalPath.startsWith(`${base}${path.sep}`)){
+    throw new Error('Path outside project blocked');
+  }
+
+  return finalPath;
+};
+
+export const relativePath = (base, filePath) => {
+  return path.relative(base, filePath).replace(/\\/g, '/');
+};
+
+export const getRegisteredProjects = async () => {
+  const data = await readProjectsData();
+  const entries = await fs.readdir(paths.projectsRoot, {withFileTypes: true});
+  const localProjects = entries
+    .filter(item => item.isDirectory())
+    .map(item => ({
+      name: item.name,
+      path: path.join(paths.projectsRoot, item.name)
+    }));
+
+  const all = [...data.projects, ...localProjects];
+  const seen = new Set();
+
+  return all.filter(item => {
+    const key = item.name.toLowerCase();
+
+    if(seen.has(key)){
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  }).sort((a, b) => a.name.localeCompare(b.name));
+};
+
+export const isAbsolutePath = (value) => /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/');
+
+export const getProjectPath = async (project) => {
+  const cleanProject = cleanText(project);
+
+  if(!cleanProject){
+    throw new Error('project requerido');
+  }
+
+  if(isAbsolutePath(cleanProject)){
+    return path.resolve(cleanProject);
+  }
+
+  const projects = await getRegisteredProjects();
+  const found = projects.find(item => item.name === cleanProject);
+
+  if(found){
+    return path.resolve(found.path);
+  }
+
+  return safeJoin(paths.projectsRoot, cleanProject);
+};
+
+export const listDir = async (dirPath, deep = 0, base = dirPath) => {
+  const entries = await fs.readdir(dirPath, {withFileTypes: true});
+  const cleanEntries = entries
+    .filter(item => !['node_modules', '.git', 'dist', 'data'].includes(item.name))
+    .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+
+  const items = [];
+
+  for(const item of cleanEntries){
+    const itemPath = path.join(dirPath, item.name);
+    const itemInfo = {
+      name: item.name,
+      path: relativePath(base, itemPath),
+      type: item.isDirectory() ? 'folder' : 'file'
+    };
+
+    if(item.isDirectory() && deep > 0){
+      itemInfo.children = await listDir(itemPath, deep - 1, base);
+    }
+
+    items.push(itemInfo);
+  }
+
+  return items;
+};

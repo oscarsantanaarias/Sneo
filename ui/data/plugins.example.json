@@ -1,0 +1,51 @@
+{
+  "_help": "Copia servers de aca a plugins.json y pone enabled:true. Paths con / no con backslash. El agente reconecta con plugin_reload o al reiniciar.",
+  "servers": [
+    {
+      "name": "fs",
+      "_desc": "Filesystem: leer/escribir/buscar en una carpeta",
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/Users/sneo/Desktop"],
+      "enabled": false
+    },
+    {
+      "name": "github",
+      "_desc": "GitHub: repos, issues, PRs (necesita token)",
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_tu_token"},
+      "enabled": false
+    },
+    {
+      "name": "search",
+      "_desc": "Busqueda web Brave (necesita API key)",
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
+      "env": {"BRAVE_API_KEY": "tu_key"},
+      "enabled": false
+    },
+    {
+      "name": "email",
+      "_desc": "Email IMAP/SMTP via server MCP de la comunidad. Cambia el paquete por el que uses y pone tus credenciales.",
+      "command": "npx.cmd",
+      "args": ["-y", "PAQUETE-MCP-DE-EMAIL"],
+      "env": {"IMAP_HOST": "imap.gmail.com", "IMAP_USER": "tu@gmail.com", "IMAP_PASS": "app_password", "SMTP_HOST": "smtp.gmail.com"},
+      "enabled": false
+    },
+    {
+      "name": "calendar",
+      "_desc": "Calendario CalDAV/Google via server MCP de la comunidad + credenciales.",
+      "command": "npx.cmd",
+      "args": ["-y", "PAQUETE-MCP-DE-CALENDARIO"],
+      "env": {"CALDAV_URL": "", "CALDAV_USER": "", "CALDAV_PASS": ""},
+      "enabled": false
+    },
+    {
+      "name": "sqlite",
+      "_desc": "Consultar una base SQLite",
+      "command": "npx.cmd",
+      "args": ["-y", "@modelcontextprotocol/server-sqlite", "--db-path", "C:/ruta/a/tu.db"],
+      "enabled": false
+    }
+  ]
+}

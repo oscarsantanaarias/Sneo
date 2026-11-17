@@ -2156,6 +2156,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     std::string helperProblem = brain.gpu ? brain.gpu->helper.problem : "";
     if(brain.gpu && engine.speculate && body["speculate"].truthy(brain.gpu->file.arch == "qwen4exp" || brain.gpu->drafting)){
         hooks.guessStart = brain.gpu->tiedDraft ? 2 : 0;
+        hooks.contextLimit = brain.gpu->contextLimit;
         hooks.verifyLimit = brain.gpu->drafting ? brain.gpu->relayLimit : brain.gpu->verifyLimit;
         if(brain.gpu->remote && frontLink.relayLimit > 1) hooks.verifyLimit = std::min(hooks.verifyLimit, frontLink.relayLimit);
         hooks.draftLimit = engine.draftLength;

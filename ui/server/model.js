@@ -81,7 +81,8 @@ const trackUsage = (run, call) => {
 const openaiChatRequest = async (currentModel, messages, tools, provider, run, side = false, plain = false) => {
   const settings = await readSettings().catch(() => ({}));
   const contextLimit = await contextWindow(settings);
-  const room = Math.min(16384, Math.floor(contextLimit / 2));
+  // lo mismo que la compactacion deja libre para responder: si se pide mas la respuesta pasa el final de la ventana
+  const room = Math.min(16384, Math.floor(contextLimit / 4));
   const body = {
     model: currentModel,
     messages: messages.map(({images, _claude, ...item}) => images?.length

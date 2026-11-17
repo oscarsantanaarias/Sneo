@@ -55,6 +55,7 @@ struct GenerateHooks {
     int draftLimit = 0;
     int copyLimit = 8;
     int guessStart = 0;
+    int contextLimit = 0;
     std::string thinkOpen = "<think>";
     std::string thinkClose = "</think>";
     std::string toolOpen = "<tool_call>";
@@ -619,6 +620,11 @@ inline GenerateResult runGenerate(SOCKET client, const GenerateRequest& req, Gen
     std::string prompt = hooks.render(req);
     std::vector<int> tokens = hooks.encode(prompt);
     result.promptTokens = tokens.size();
+    // la respuesta termina como length al llegar al final de la ventana en vez de fallar en la posicion siguiente
+    // el margen deja lugar a las filas que se verifican de mas con los borradores
+    int outputCap = hooks.contextLimit > 0
+        ? std::min(req.maxTokens, std::max(1, hooks.contextLimit - (int)tokens.size() - 48))
+        : req.maxTokens;
     bool notices = req.stream && !req.messagesApi;
     if(notices){
         uint64_t reuse = hooks.reusable ? hooks.reusable(tokens) : 0;
@@ -761,7 +767,7 @@ inline GenerateResult runGenerate(SOCKET client, const GenerateRequest& req, Gen
             result.stopHit = stop;
             return 1;
         }
-        if((int)result.outputTokens >= req.maxTokens){
+        if((int)result.outputTokens >= outputCap){
             result.finish = "length";
             return 1;
         }

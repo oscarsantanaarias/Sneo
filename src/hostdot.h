@@ -1,5 +1,6 @@
 #pragma once
 #include "quant.h"
+#include <intrin.h>
 
 struct HostPacked {
     std::vector<int8_t> levels;
@@ -257,7 +258,24 @@ inline void groupCodes(const uint8_t* block, int g, float base, __m256i& mag, __
     }
 }
 
-template<int TYPE, bool RESIDUAL, int COUNT>
+// avx-vnni de las intel desde la 12a generacion multiplica bytes y suma de a cuatro en una instruccion
+// sin vnni van maddubs y madd que dan lo mismo porque los productos de estos pesos no llenan los 16 bits intermedios
+inline bool hostVnni() {
+    static const bool found = []{
+        int info[4] = {};
+        __cpuidex(info, 7, 1);
+        return (info[0] & (1 << 4)) != 0;
+    }();
+    return found;
+}
+
+template<bool VNNI>
+inline __m256i byteDots(__m256i mag, __m256i x) {
+    if constexpr(VNNI) return _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), mag, x);
+    else return _mm256_madd_epi16(_mm256_maddubs_epi16(mag, x), _mm256_set1_epi16(1));
+}
+
+template<int TYPE, bool RESIDUAL, int COUNT, bool VNNI>
 inline void rowDots(const uint8_t* row, int cols, const HostPacked& in, size_t at, float* out, size_t outStep) {
     constexpr int span = TYPE == 20 || TYPE == 8 || TYPE == 7
         ? 32
@@ -291,7 +309,6 @@ inline void rowDots(const uint8_t* row, int cols, const HostPacked& in, size_t a
                                                     ? 56
                                                     : 18;
     constexpr bool lowered = TYPE == 12 || TYPE == 13 || TYPE == 7;
-    const __m256i ones = _mm256_set1_epi16(1);
     __m256 even[COUNT], odd[COUNT];
     float minus[COUNT];
     const int8_t* x[COUNT];
@@ -315,10 +332,10 @@ inline void rowDots(const uint8_t* row, int cols, const HostPacked& in, size_t a
             const int8_t* v = x[t] + 64 * u;
             const float* k = s[t] + 2 * u;
             __m256i qv = _mm256_loadu_si256((const __m256i*)v);
-            __m256 part = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_madd_epi16(_mm256_maddubs_epi16(mag, lowered ? qv : _mm256_sign_epi8(qv, sign)), ones)), _mm256_set1_ps(k[0]));
+            __m256 part = _mm256_mul_ps(_mm256_cvtepi32_ps(byteDots<VNNI>(mag, lowered ? qv : _mm256_sign_epi8(qv, sign))), _mm256_set1_ps(k[0]));
             if constexpr(RESIDUAL){
                 __m256i rv = _mm256_loadu_si256((const __m256i*)(v + 32));
-                part = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_madd_epi16(_mm256_maddubs_epi16(mag, lowered ? rv : _mm256_sign_epi8(rv, sign)), ones)), _mm256_set1_ps(k[1]), part);
+                part = _mm256_fmadd_ps(_mm256_cvtepi32_ps(byteDots<VNNI>(mag, lowered ? rv : _mm256_sign_epi8(rv, sign))), _mm256_set1_ps(k[1]), part);
             }
             acc[t] = _mm256_fmadd_ps(part, scale, acc[t]);
             if constexpr(TYPE == 12 || TYPE == 13 || TYPE == 7) minus[t] += drop * (k[0] * (float)sum[t][2 * u] + (RESIDUAL ? k[1] * (float)sum[t][2 * u + 1] : 0.0f));
@@ -354,14 +371,13 @@ inline void rowDots(const uint8_t* row, int cols, const HostPacked& in, size_t a
     }
 }
 
-template<int TYPE, bool RESIDUAL, int COUNT>
+template<int TYPE, bool RESIDUAL, int COUNT, bool VNNI>
 inline void blockDots(const uint8_t* row, int cols, const HostPacked& in, size_t at, float* out, size_t outStep) {
     constexpr uint64_t bytes = TYPE == 18
         ? 98
         : TYPE == 22
             ? 82
             : 110;
-    const __m256i ones = _mm256_set1_epi16(1);
     const __m256i spread = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3);
     const __m256i pick = _mm256_set1_epi64x((long long)0x8040201008040201ULL);
     const __m256i unit = _mm256_set1_epi8(1);
@@ -406,10 +422,10 @@ inline void blockDots(const uint8_t* row, int cols, const HostPacked& in, size_t
             const int8_t* v = x[t] + 64 * u;
             const float* k = s[t] + 2 * u;
             __m256i qv = _mm256_loadu_si256((const __m256i*)v);
-            __m256 part = _mm256_mul_ps(_mm256_cvtepi32_ps(_mm256_madd_epi16(_mm256_maddubs_epi16(mag, _mm256_sign_epi8(qv, sign)), ones)), _mm256_set1_ps(k[0]));
+            __m256 part = _mm256_mul_ps(_mm256_cvtepi32_ps(byteDots<VNNI>(mag, _mm256_sign_epi8(qv, sign))), _mm256_set1_ps(k[0]));
             if constexpr(RESIDUAL){
                 __m256i rv = _mm256_loadu_si256((const __m256i*)(v + 32));
-                part = _mm256_fmadd_ps(_mm256_cvtepi32_ps(_mm256_madd_epi16(_mm256_maddubs_epi16(mag, _mm256_sign_epi8(rv, sign)), ones)), _mm256_set1_ps(k[1]), part);
+                part = _mm256_fmadd_ps(_mm256_cvtepi32_ps(byteDots<VNNI>(mag, _mm256_sign_epi8(rv, sign))), _mm256_set1_ps(k[1]), part);
             }
             acc[t] = _mm256_fmadd_ps(part, scale, acc[t]);
         }
@@ -464,10 +480,10 @@ inline void blockDots(const uint8_t* row, int cols, const HostPacked& in, size_t
     }
 }
 
-template<int TYPE, bool RESIDUAL, int COUNT>
+template<int TYPE, bool RESIDUAL, int COUNT, bool VNNI>
 inline void dotsOf(const uint8_t* row, int cols, const HostPacked& in, size_t at, float* out, size_t outStep) {
-    if constexpr(TYPE == 18 || TYPE == 21 || TYPE == 22) blockDots<TYPE, RESIDUAL, COUNT>(row, cols, in, at, out, outStep);
-    else rowDots<TYPE, RESIDUAL, COUNT>(row, cols, in, at, out, outStep);
+    if constexpr(TYPE == 18 || TYPE == 21 || TYPE == 22) blockDots<TYPE, RESIDUAL, COUNT, VNNI>(row, cols, in, at, out, outStep);
+    else rowDots<TYPE, RESIDUAL, COUNT, VNNI>(row, cols, in, at, out, outStep);
 }
 
 struct HostProduct {
@@ -478,7 +494,7 @@ struct HostProduct {
     int count = 1;
 };
 
-template<int TYPE, bool RESIDUAL>
+template<int TYPE, bool RESIDUAL, bool VNNI>
 inline void productRows(const HostProduct& job, int start, int end) {
     const Matrix& m = job.weight;
     for(int row = start; row < end; row++){
@@ -488,36 +504,36 @@ inline void productRows(const HostProduct& job, int start, int end) {
             size_t at = (size_t)(job.first + t) * m.cols;
             float* out = job.output + (size_t)t * m.rows + row;
             switch(left){
-                case 8: dotsOf<TYPE, RESIDUAL, 8>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
-                case 7: dotsOf<TYPE, RESIDUAL, 7>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
-                case 6: dotsOf<TYPE, RESIDUAL, 6>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
-                case 5: dotsOf<TYPE, RESIDUAL, 5>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
-                case 4: dotsOf<TYPE, RESIDUAL, 4>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
-                case 3: dotsOf<TYPE, RESIDUAL, 3>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
-                case 2: dotsOf<TYPE, RESIDUAL, 2>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
-                default: dotsOf<TYPE, RESIDUAL, 1>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                case 8: dotsOf<TYPE, RESIDUAL, 8, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                case 7: dotsOf<TYPE, RESIDUAL, 7, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                case 6: dotsOf<TYPE, RESIDUAL, 6, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                case 5: dotsOf<TYPE, RESIDUAL, 5, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                case 4: dotsOf<TYPE, RESIDUAL, 4, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                case 3: dotsOf<TYPE, RESIDUAL, 3, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                case 2: dotsOf<TYPE, RESIDUAL, 2, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
+                default: dotsOf<TYPE, RESIDUAL, 1, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
             }
         }
     }
 }
 
-template<bool RESIDUAL>
+template<bool RESIDUAL, bool VNNI>
 inline void productRowsOf(const HostProduct& job, int first, int end) {
     switch(job.weight.type){
-        case 16: productRows<16, RESIDUAL>(job, first, end); break;
-        case 17: productRows<17, RESIDUAL>(job, first, end); break;
-        case 18: productRows<18, RESIDUAL>(job, first, end); break;
-        case 20: productRows<20, RESIDUAL>(job, first, end); break;
-        case 21: productRows<21, RESIDUAL>(job, first, end); break;
-        case 22: productRows<22, RESIDUAL>(job, first, end); break;
-        case 23: productRows<23, RESIDUAL>(job, first, end); break;
-        case 8: productRows<8, RESIDUAL>(job, first, end); break;
-        case 7: productRows<7, RESIDUAL>(job, first, end); break;
-        case 12: productRows<12, RESIDUAL>(job, first, end); break;
-        case 13: productRows<13, RESIDUAL>(job, first, end); break;
-        case 14: productRows<14, RESIDUAL>(job, first, end); break;
-        case 29: productRows<29, RESIDUAL>(job, first, end); break;
-        default: productRows<42, RESIDUAL>(job, first, end); break;
+        case 16: productRows<16, RESIDUAL, VNNI>(job, first, end); break;
+        case 17: productRows<17, RESIDUAL, VNNI>(job, first, end); break;
+        case 18: productRows<18, RESIDUAL, VNNI>(job, first, end); break;
+        case 20: productRows<20, RESIDUAL, VNNI>(job, first, end); break;
+        case 21: productRows<21, RESIDUAL, VNNI>(job, first, end); break;
+        case 22: productRows<22, RESIDUAL, VNNI>(job, first, end); break;
+        case 23: productRows<23, RESIDUAL, VNNI>(job, first, end); break;
+        case 8: productRows<8, RESIDUAL, VNNI>(job, first, end); break;
+        case 7: productRows<7, RESIDUAL, VNNI>(job, first, end); break;
+        case 12: productRows<12, RESIDUAL, VNNI>(job, first, end); break;
+        case 13: productRows<13, RESIDUAL, VNNI>(job, first, end); break;
+        case 14: productRows<14, RESIDUAL, VNNI>(job, first, end); break;
+        case 29: productRows<29, RESIDUAL, VNNI>(job, first, end); break;
+        default: productRows<42, RESIDUAL, VNNI>(job, first, end); break;
     }
 }
 
@@ -529,7 +545,9 @@ inline void hostMultiply(ThreadPool& pool, const std::vector<HostProduct>& list,
     for(size_t p = 0; p < list.size(); p++){
         const Matrix& m = list[p].weight;
         int cols = std::max(1, m.cols);
-        int most = std::max(1, std::min(m.rows, 32768 / cols));
+        // los expertos van en pedazos chicos y las matrices grandes de un denso en pedazos de un millon de pesos
+        // con el tope chico eran cientos de miles de tareas de una a seis filas por paso y la cpu leia la ram a menos de la mitad
+        int most = std::max(1, std::min(m.rows, ((uint64_t)m.rows * cols >= (1ULL << 22) ? (1 << 20) : 32768) / cols));
         int least = std::max(1, std::min(most, 4096 / cols));
         double cost = (double)cols * (2 + list[p].count);
         for(int r = 0; r < m.rows;){
@@ -546,7 +564,10 @@ inline void hostMultiply(ThreadPool& pool, const std::vector<HostProduct>& list,
         const HostProduct& job = list[owner[chunk]];
         int first = start[chunk];
         int end = first + span[chunk];
-        if(residual) productRowsOf<true>(job, first, end);
-        else productRowsOf<false>(job, first, end);
+        bool vnni = hostVnni();
+        if(residual && vnni) productRowsOf<true, true>(job, first, end);
+        else if(residual) productRowsOf<true, false>(job, first, end);
+        else if(vnni) productRowsOf<false, true>(job, first, end);
+        else productRowsOf<false, false>(job, first, end);
     });
 }

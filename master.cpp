@@ -2211,6 +2211,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     uint64_t relayRoutesBefore = brain.gpu ? brain.gpu->relayRoutes : 0, relayKeptBefore = brain.gpu ? brain.gpu->relayKept : 0;
     uint64_t relayCpuBefore = brain.gpu ? brain.gpu->relayCpu : 0, relayWarmBefore = brain.gpu ? brain.gpu->relayWarm : 0;
     double serveWaitBefore = brain.gpu ? brain.gpu->serveWait : 0, serveWorkBefore = brain.gpu ? brain.gpu->serveWork : 0;
+    double denseWorkBefore = brain.gpu ? brain.gpu->denseWork : 0, denseWaitBefore = brain.gpu ? brain.gpu->denseWait : 0;
     uint64_t usedBefore = brain.gpu ? brain.gpu->foreseenUsed : 0;
     double frontBefore = frontLink.roundMs;
     uint64_t roundsBefore = frontLink.rounds;
@@ -2258,6 +2259,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     if(split) std::cout << ", " << frontLink.node << " " << frontLink.roundMs - frontBefore << " ms in " << frontLink.rounds - roundsBefore << " rounds (this pc waited " << brain.gpu->frontMs - waitedBefore << " ms), " << (frontLink.sentBytes - sentBefore) / 1048576.0 << " MB sent and " << (frontLink.gotBytes - gotBefore) / 1048576.0 << " MB back";
     if(brain.gpu) std::cout << ", cpu experts " << brain.gpu->expertMs - expertBefore << " ms, " << brain.gpu->coldExperts - coldBefore << " outside the warm cache, " << brain.gpu->foreseen - foreseenBefore << " read ahead (" << brain.gpu->foreseenUsed - usedBefore << " used)";
     if(brain.gpu && brain.gpu->liftCount > liftedBefore) std::cout << ", " << brain.gpu->liftCount - liftedBefore << " recent experts brought to video memory";
+    if(brain.gpu && brain.gpu->denseHostBytes) std::cout << ", layers in ram: cpu worked " << brain.gpu->denseWork - denseWorkBefore << " ms and waited " << brain.gpu->denseWait - denseWaitBefore << " ms for the gpu";
     if(brain.gpu && brain.gpu->relayRoutes > relayRoutesBefore) std::cout << ", verify passes: " << 100.0 * (double)(brain.gpu->relayKept - relayKeptBefore) / (double)(brain.gpu->relayRoutes - relayRoutesBefore) << "% of routes in vram, " << brain.gpu->relayWarm - relayWarmBefore << " rows from pinned ram, " << brain.gpu->relayCpu - relayCpuBefore << " on the cpu, host waited " << brain.gpu->serveWait - serveWaitBefore << " ms for the gpu and worked " << brain.gpu->serveWork - serveWorkBefore << " ms";
     if(brain.gpu && brain.gpu->helper.rows > helpedBefore) std::cout << ", " << brain.gpu->helper.name << " computed " << brain.gpu->helper.rows - helpedBefore << " expert rows";
     if(brain.gpu && !brain.gpu->helper.ready && !brain.gpu->helper.problem.empty() && helpedBefore > 0) std::cout << ", " << brain.gpu->helper.problem;

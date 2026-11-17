@@ -552,6 +552,7 @@ struct GpuModel {
     uint64_t denseHostBytes = 0;
     int denseCpuRows = 16;
     uint64_t denseStage = 0;
+    double denseWork = 0.0, denseWait = 0.0;
     float* hostDenseOut = nullptr;
     uint64_t mappedDenseOut = 0;
     uint64_t halfRoom = 0;
@@ -1820,6 +1821,7 @@ struct GpuModel {
         }
 
         if(dense){
+            // sin fijar los hilos: con las capas en ram los nucleos e tambien suman y fijarlos a los p fue 13% mas lento
             pool.start(std::max(0, threads - 1));
             ready = true;
             reset();
@@ -6406,6 +6408,7 @@ struct GpuModel {
             }
         }
         waitMs += since(clock);
+        denseWait += since(clock);
         hostFlags[40] = want;
         _mm_sfence();
         auto started = std::chrono::steady_clock::now();
@@ -6419,6 +6422,7 @@ struct GpuModel {
         work = {{L.hostDown, &hostHidden, 0, hostDenseOut, n}};
         hostMultiply(pool, work, residual);
         expertMs += since(started);
+        denseWork += since(started);
         _mm_sfence();
         hostFlags[32] = want;
         return true;

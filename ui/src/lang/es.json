@@ -819,5 +819,17 @@
   "Load its model first": "Primero carga su modelo",
   "The model of {0} is not loaded yet. Load it in Agents, Models.": "El modelo de {0} todavía no está cargado. Cárgalo en Agentes, Modelos.",
   "Load the models of these agents first": "Primero carga los modelos de estos agentes",
-  "Load the models of the team first, in Models": "Primero carga los modelos del equipo, en Modelos"
+  "Load the models of the team first, in Models": "Primero carga los modelos del equipo, en Modelos",
+  "Opening the model": "Abriendo el modelo",
+  "Building the GPU kernels": "Armando los kernels de la GPU",
+  "Reading the weights into video memory": "Leyendo los pesos a la memoria de video",
+  "Loading the draft layer": "Cargando la capa borrador",
+  "Pinning the experts in RAM": "Fijando los expertos en la RAM",
+  "Reading the experts into video memory": "Leyendo los expertos a la memoria de video",
+  "Copying the experts to RAM": "Copiando los expertos a la RAM",
+  "Filling the second GPU": "Llenando la segunda GPU",
+  "Stopping the load...": "Deteniendo la carga...",
+  "{0} · you can write when it is ready": "{0} · puedes escribir cuando esté listo",
+  "stopping": "deteniendo",
+  "loading {0}%": "cargando {0}%"
 }

@@ -550,6 +550,7 @@ void loadBrain(std::string path, uint64_t ticket) {
         }
     }
     stopLoading = false;
+    loadSay("Opening the model");
     if(brain.ready()) releaseBrain();
     brainState = 1;
     uint64_t start = nowMs();
@@ -2698,6 +2699,10 @@ void handleClient(SOCKET client) {
             std::lock_guard<std::mutex> guard(engine.lock);
             out << "{\"status\":\"ok\",\"currentModel\":" << quoteJson(engine.loaded ? engine.modelPath : "") << ",\"loaded\":" << (engine.loaded ? "true" : "false")
                 << ",\"ready\":" << (brainState == 2 ? "true" : "false") << ",\"warming\":" << (brainState == 1 ? "true" : "false");
+            if(brainState == 1){
+                std::lock_guard<std::mutex> step(loadStatus.lock);
+                out << ",\"load\":{\"step\":" << quoteJson(stopLoading ? std::string("Stopping") : loadStatus.step) << ",\"done\":" << loadStatus.done.load() << ",\"total\":" << loadStatus.total.load() << "}";
+            }
             if(engine.healedAt) out << ",\"healed\":{\"seconds\":" << (nowMs() - engine.healedAt) / 1000 << ",\"mb\":" << engine.healedMb << "}";
         }
         {

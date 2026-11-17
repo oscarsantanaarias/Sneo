@@ -783,6 +783,13 @@ function App(){
   const shownMode = loading && runMode ? runMode : chatMode;
   const modelLoading = engineFiles.warming;
   const modelIdle = !engineFiles.ready && !engineFiles.warming;
+  const loadPercent = modelLoading && engineFiles.load?.total > 0 ? Math.min(100, Math.floor(engineFiles.load.done / engineFiles.load.total * 100)) : null;
+  const stoppingLoad = fileBusy === 'stop' || engineFiles.load?.step === 'Stopping';
+  const loadStep = !modelLoading
+    ? ''
+    : stoppingLoad
+      ? tr('Stopping the load...')
+      : (engineFiles.load?.step ? tr(engineFiles.load.step) : tr('Loading into memory...')) + (loadPercent !== null ? ` ${loadPercent}%` : '');
   const preparingNow = engineFiles.ready && !!engineFiles.prepare?.task;
   const prepareStep = !preparingNow
     ? ''
@@ -1138,7 +1145,15 @@ function App(){
       setSavedContext(size);
       const stats = (res.nodes || []).find(node => node.self)?.stats || {};
       const slots = Array.isArray(res.slots) ? res.slots : [];
-      const limitOf = (kind) => Math.round(Number(slots.find(item => item.node === res.self && item.kind === kind)?.limit || 0) / 1073741824 * 10) / 10;
+      const ramTotal = Number(stats.ramTotal || 0) / 1073741824;
+      const vramTotal = Number(stats.gpu?.vramTotal || stats.vramTotal || 0) / 1073741824;
+      // un slot guardado sin gb ni porcentaje es usar todo lo que se pueda: se muestra el total y no lo que alcanzo hoy con otros programas abiertos
+      const limitOf = (kind) => {
+        const slot = slots.find(item => item.node === res.self && item.kind === kind);
+        const total = kind === 'gpu' ? vramTotal : ramTotal;
+        if(slot && !Number(slot.gb) && !Number(slot.percent) && !Number(slot.keep) && total > 0) return Math.floor(total * 10) / 10;
+        return Math.round(Number(slot?.limit || 0) / 1073741824 * 10) / 10;
+      };
       const vram = limitOf('gpu');
       const ram = limitOf('ram');
       const gpus = Array.isArray(res.gpus) ? res.gpus : [];
@@ -1155,7 +1170,7 @@ function App(){
       const vision = res.vision === true;
       const visionGpu = Number(res.visionGpu ?? -1);
       setModelDrive(String(stats.drive || ''));
-      setMemoryPlan({self: res.self || '', screen: Number(res.selfScreen ?? -1), slots, vramTotal: Number(stats.gpu?.vramTotal || stats.vramTotal || 0) / 1073741824, ramTotal: Number(stats.ramTotal || 0) / 1073741824, vram, ram, savedVram: vram, savedRam: ram, gpus, mainGpu, savedMainGpu: mainGpu, secondGpu, savedSecondGpu: secondGpu, helperGpu, savedHelperGpu: helperGpu, helperGb, savedHelperGb: helperGb, drafts, savedDrafts: drafts, copyReach, savedCopyReach: copyReach, holdRam, savedHoldRam: holdRam, ramWhole, savedRamWhole: ramWhole, pinShare, savedPinShare: pinShare, pinGb, savedPinGb: pinGb, vision, savedVision: vision, visionGpu, savedVisionGpu: visionGpu, visionReady: res.visionReady === true, visionProblem: String(res.visionProblem || '')});
+      setMemoryPlan({self: res.self || '', screen: Number(res.selfScreen ?? -1), slots, vramTotal, ramTotal, vram, ram, savedVram: vram, savedRam: ram, gpus, mainGpu, savedMainGpu: mainGpu, secondGpu, savedSecondGpu: secondGpu, helperGpu, savedHelperGpu: helperGpu, helperGb, savedHelperGb: helperGb, drafts, savedDrafts: drafts, copyReach, savedCopyReach: copyReach, holdRam, savedHoldRam: holdRam, ramWhole, savedRamWhole: ramWhole, pinShare, savedPinShare: pinShare, pinGb, savedPinGb: pinGb, vision, savedVision: vision, visionGpu, savedVisionGpu: visionGpu, visionReady: res.visionReady === true, visionProblem: String(res.visionProblem || '')});
     } catch(e) {
       setSavedContext(0);
     }
@@ -1235,7 +1250,7 @@ function App(){
   const showEngineFiles = res => {
     const list = Array.isArray(res.models) ? res.models : [];
     const current = res.loaded ? String(res.currentModel || '') : '';
-    setEngineFiles({list, current, reachable: true, ready: !!res.ready, warming: !!res.warming, prepare: res.prepare || null, healed: res.healed || null});
+    setEngineFiles({list, current, reachable: true, ready: !!res.ready, warming: !!res.warming, load: res.load || null, prepare: res.prepare || null, healed: res.healed || null});
     if(res.folder) setModelFolder(res.folder);
     if(current) setSettings(prev => ({...prev, model: current.split(/[\\/]/).pop()}));
     setPickedFile(prev => list.some(item => item.path === prev)
@@ -1319,8 +1334,9 @@ function App(){
     setFileBusy('stop');
     try {
       await fetch(`${apiUrl}/api/engine/files/stop`, {method: 'POST'});
-      for(let i = 0; i < 30; i++){
-        await new Promise(done => setTimeout(done, 1000));
+      // la carga para al terminar el paso en curso asi que se espera a que el motor lo confirme en vez de soltar el boton a los 30 s
+      for(let i = 0; i < 240; i++){
+        await new Promise(done => setTimeout(done, 500));
         const req = await fetch(`${apiUrl}/api/engine/files`);
         const res = await req.json();
         showEngineFiles(res);
@@ -1402,7 +1418,7 @@ function App(){
 
   useEffect(() => {
     if(!engineFiles.warming && !engineFiles.prepare?.task) return;
-    const timer = setTimeout(loadEngineFiles, engineFiles.warming ? 1500 : 3000);
+    const timer = setTimeout(loadEngineFiles, engineFiles.warming ? 1000 : 3000);
     return () => clearTimeout(timer);
   }, [engineFiles]);
 
@@ -2555,7 +2571,7 @@ function App(){
             : modelLoading
               ? engineFiles.healed && engineFiles.healed.seconds < 180
                 ? tr('Windows moved {0} MB of the model out of video memory, Sneo loads it again to get the speed back...', engineFiles.healed.mb)
-                : tr('Loading the model, you can write when it is ready...')
+                : tr('{0} · you can write when it is ready', loadStep)
               : preparingNow
                 ? tr('{0} · you can write when it finishes', prepareStep)
                 : loading
@@ -2706,12 +2722,14 @@ function App(){
               setPopover(popover === 'brain' ? null : 'brain');
             }}
           >
-            {fileBusy === 'load'
-              ? tr('Loading...')
-              : modelTitle(engineFiles.current, engineFiles.list) || tr('No model')}
+            <span className="brain-name">
+              {fileBusy === 'load'
+                ? tr('Loading...')
+                : modelTitle(engineFiles.current, engineFiles.list) || tr('No model')}
+            </span>
             <span className="brain-effort">{depthLevels.find(item => item.value === thinkDepth)?.label || tr('Normal')}</span>
             {engineFiles.current && !engineFiles.ready && (
-              <span className={engineFiles.warming ? 'brain-state warming' : 'brain-state'}>{engineFiles.warming ? tr('loading') : tr('idle')}</span>
+              <span className={engineFiles.warming ? 'brain-state warming' : 'brain-state'}>{engineFiles.warming ? stoppingLoad ? tr('stopping') : loadPercent !== null ? tr('loading {0}%', loadPercent) : tr('loading') : tr('idle')}</span>
             )}
             {engineFiles.ready && engineFiles.prepare?.task && <span className="brain-state warming">{tr('preparing')}</span>}
             <i className="fa-solid fa-chevron-up depth-caret"></i>
@@ -2846,7 +2864,7 @@ function App(){
                   {engineFiles.ready
                     ? tr('In memory')
                     : engineFiles.warming
-                      ? tr('Loading into memory...')
+                      ? loadStep
                       : tr('Not in memory, load it to start')}
                 </span>
                 {engineFiles.ready && (
@@ -2860,11 +2878,16 @@ function App(){
                   </button>
                 )}
                 {engineFiles.warming && (
-                  <button type="button" className="brain-action" disabled={fileBusy === 'stop'} onClick={stopEngineLoad}>
-                    {fileBusy === 'stop' ? tr('Stopping...') : tr('Stop loading')}
+                  <button type="button" className="brain-action" disabled={stoppingLoad} onClick={stopEngineLoad}>
+                    {stoppingLoad ? tr('Stopping...') : tr('Stop loading')}
                   </button>
                 )}
               </div>
+              {engineFiles.warming && loadPercent !== null && !stoppingLoad && (
+                <div className="stats-meter brain-load-meter">
+                  <div className="stats-meter-fill" style={{width: `${loadPercent}%`}}></div>
+                </div>
+              )}
 
             </div>
           )}

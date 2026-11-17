@@ -26,6 +26,22 @@ struct GpuMatrix {
 
 inline std::atomic<bool> stopLoading{false};
 
+// el paso de la carga y cuanto lleva para que la app no muestre solo un cargando sin avance
+struct LoadStatus {
+    std::mutex lock;
+    std::string step;
+    std::atomic<uint64_t> done{0};
+    std::atomic<uint64_t> total{0};
+};
+inline LoadStatus loadStatus;
+
+inline void loadSay(const std::string& step) {
+    std::lock_guard<std::mutex> guard(loadStatus.lock);
+    loadStatus.step = step;
+    loadStatus.done = 0;
+    loadStatus.total = 0;
+}
+
 inline std::string heatFor(const std::string& modelPath, size_t layerCount, int width) {
     std::filesystem::path folder = std::filesystem::path(runtimeFolder()).parent_path() / "profiles";
     std::string stem = std::filesystem::path(modelPath).stem().string();
@@ -715,6 +731,10 @@ struct GpuModel {
         std::sort(list.begin(), list.end(), [](const std::array<uint64_t, 4>& a, const std::array<uint64_t, 4>& b){
             return a[0] != b[0] ? a[0] < b[0] : a[1] < b[1];
         });
+        uint64_t sum = 0;
+        for(const auto& f : list) sum += f[2];
+        loadStatus.done = 0;
+        loadStatus.total = sum;
 
         while(staging.size() < 8){
             void* room = nullptr;
@@ -755,6 +775,7 @@ struct GpuModel {
                     }
                     if(toHost) memcpy((void*)f[3], buffer + skip, (size_t)f[2]);
                     else if(cudaLink().copyUp(f[3], buffer + skip, (size_t)f[2]) != 0) broken = true;
+                    loadStatus.done += f[2];
                 }
                 for(HANDLE h : handles){
                     if(h != INVALID_HANDLE_VALUE) CloseHandle(h);
@@ -1118,6 +1139,7 @@ struct GpuModel {
             + "\n#define IHEADS " + std::to_string(indexHeads)
             + "\n#define EXACT_MIX " + std::string(exactMix ? "1" : "0")
             + "\n#define SILU_NORM " + std::string(file.arch != "qwen4exp" ? "1" : "0") + "\n";
+        loadSay("Building the GPU kernels");
         if(!buildModule(sizes + quantKernelSource + modelKernelSource, module)){
             problem = "kernel build failed: " + module.log;
             return false;
@@ -1444,6 +1466,11 @@ struct GpuModel {
             reads.push_back({w.first->file, w.first->offset, w.first->bytes, arena + used});
             used += (w.first->bytes + 255) / 256 * 256;
         }
+        if(stopLoading){
+            problem = "loading stopped";
+            return false;
+        }
+        loadSay("Reading the weights into video memory");
         if(!fetchAll(reads)) return false;
         reads.clear();
         for(auto& n : narrowed){
@@ -1510,6 +1537,11 @@ struct GpuModel {
         pleHistory = grab((uint64_t)pleTaps * hcWidth * 4);
         replayStore = grab(4ULL * (replayStride() * layers.size() + (uint64_t)relayLimit * hcWidth));
         if(vocabPath.empty()) vocabPath = (std::filesystem::path(runtimeFolder()).parent_path() / "profiles" / (std::filesystem::path(file.paths[0]).stem().string() + ".draftvocab")).string();
+        if(stopLoading){
+            problem = "loading stopped";
+            return false;
+        }
+        if(last && file.arch == "qwen4exp" && !draftPath.empty() && std::filesystem::exists(draftPath)) loadSay("Loading the draft layer");
         if(last && file.arch == "qwen4exp" && !draftPath.empty() && std::filesystem::exists(draftPath) && !loadDraft(draftPath)){
             std::string why = problem;
             problem.clear();
@@ -1805,7 +1837,12 @@ struct GpuModel {
             ? (int)std::min<uint64_t>((uint64_t)recentFor(planned) + recentSpare, pinnedRoom / perExpert - (uint64_t)warmPerLayer)
             : 0;
         int warmTries = 0;
+        loadSay("Pinning the experts in RAM");
         while(warmPerLayer > 0){
+            if(stopLoading){
+                problem = "loading stopped";
+                return false;
+            }
             size_t mark = pinned.size();
             bool fits = true;
             for(int l = firstLayer; l < endLayer && fits; l++){
@@ -1986,8 +2023,15 @@ struct GpuModel {
             }
         }
 
+        if(stopLoading){
+            problem = "loading stopped";
+            return false;
+        }
+        loadSay("Reading the experts into video memory");
         if(!fetchAll(reads)) return false;
+        loadSay("Copying the experts to RAM");
         if(!fetchAll(hostReads, true)) return false;
+        if(helpPerLayer > 0) loadSay("Filling the second GPU");
         if(helpPerLayer > 0 && !fetchAll(helperReads, false, helper.context)){
             if(stopLoading) return false;
             helper.problem = "could not fill the second gpu: " + problem;

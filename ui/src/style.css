@@ -1976,6 +1976,22 @@ textarea:focus {
   background: var(--bg-3);
 }
 
+.brain-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.brain-effort,
+.brain-state,
+.brain-chip .depth-caret {
+  flex-shrink: 0;
+}
+
+.brain-load-meter {
+  margin: 0 10px 8px;
+}
+
 .brain-effort {
   color: var(--text-faint);
 }

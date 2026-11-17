@@ -551,6 +551,7 @@ struct GpuModel {
     uint64_t halfWeights = 0;
     uint64_t denseHostBytes = 0;
     int denseCpuRows = 16;
+    uint64_t denseStage = 0;
     float* hostDenseOut = nullptr;
     uint64_t mappedDenseOut = 0;
     uint64_t halfRoom = 0;
@@ -1484,8 +1485,10 @@ struct GpuModel {
                 if(wanted[i].first->layer >= 0 && (name.find("ffn_gate.weight") != std::string::npos || name.find("ffn_up.weight") != std::string::npos || name.find("ffn_down.weight") != std::string::npos)) order.push_back(i);
             }
             std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b){ return wanted[a].first->layer > wanted[b].first->layer; });
+            uint64_t layerFfn = 0;
+            for(size_t k = 0; k < order.size() && wanted[order[k]].first->layer == wanted[order[0]].first->layer; k++) layerFfn += (wanted[order[k]].first->bytes + 255) / 256 * 256;
             uint64_t onCard = denseBytes;
-            for(size_t k = 0; k < order.size() && onCard > room;){
+            for(size_t k = 0; k < order.size() && onCard + (denseHostBytes ? layerFfn : 0) > room;){
                 int layer = wanted[order[k]].first->layer;
                 for(; k < order.size() && wanted[order[k]].first->layer == layer; k++){
                     uint64_t bytes = (wanted[order[k]].first->bytes + 255) / 256 * 256;
@@ -1499,6 +1502,16 @@ struct GpuModel {
 
         uint64_t arena = grab(denseBytes - denseHostBytes + 256);
         if(!arena) return false;
+        // al leer un prompt la mlp de cada capa en ram se copia entera a este lugar y se calcula desde la vram
+        if(denseHostBytes){
+            uint64_t widest = 0;
+            for(int l = firstLayer; l < endLayer; l++){
+                const GpuLayer& L = layers[l];
+                widest = std::max<uint64_t>(widest, ((uint64_t)L.sharedGate.rows * L.sharedGate.stride + 255) / 256 * 256 + ((uint64_t)L.sharedUp.rows * L.sharedUp.stride + 255) / 256 * 256 + ((uint64_t)L.sharedDown.rows * L.sharedDown.stride + 255) / 256 * 256);
+            }
+            denseStage = grab(widest);
+            if(!denseStage) return false;
+        }
         void* hostBlock = nullptr;
         uint64_t hostAlias = 0;
         if(denseHostBytes){
@@ -4570,6 +4583,23 @@ struct GpuModel {
             go("tellHost", 1, 1, 1, 1, mappedFlags + 64, mappedFlags, l);
             go("awaitHost", 1, 1, 1, 1, mappedFlags + 128, mappedFlags, l, spillCounts + 4ULL * l, mappedFlags + 192, mappedFlags + 160);
             go("copyWords", (unsigned int)((n * hidden + 255) / 256), 1, 256, 1, mappedDenseOut, shared, n * hidden);
+            return;
+        }
+        if(L.hostFfn && denseStage && n > denseCpuRows){
+            GpuMatrix gate = L.sharedGate, up = L.sharedUp, down = L.sharedDown;
+            const Matrix* from[3] = {&L.hostGate, &L.hostUp, &L.hostDown};
+            GpuMatrix* into[3] = {&gate, &up, &down};
+            uint64_t at = denseStage;
+            for(int i = 0; i < 3; i++){
+                uint64_t bytes = (uint64_t)from[i]->rows * from[i]->stride;
+                if(cudaQueue().copyUp(at, from[i]->data, (size_t)bytes, stream) != 0) failed = true;
+                into[i]->data = at;
+                at += (bytes + 255) / 256 * 256;
+            }
+            pack(x, n * hidden, 0);
+            projectMany({{&gate, sharedGateOut}, {&up, sharedUpOut}}, x, 0, n);
+            swigluPack(sharedGateOut, sharedUpOut, sharedHidden, n * expertWidth, 1);
+            project(down, sharedHidden, 1, shared, n);
             return;
         }
         pack(x, n * hidden, 0);

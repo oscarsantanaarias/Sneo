@@ -91,6 +91,8 @@ struct GpuLayer {
     uint64_t indexKeyNorm = 0;
 
     GpuMatrix router, sharedScalar, sharedGate, sharedUp, sharedDown;
+    bool hostFfn = false;
+    Matrix hostGate, hostUp, hostDown;
     Matrix expertGate, expertUp, expertDown;
     const TensorInfo* expertTensor[3] = {};
     uint64_t resident[3] = {};
@@ -547,6 +549,10 @@ struct GpuModel {
     void* blas = nullptr;
     uint64_t blasWork = 0;
     uint64_t halfWeights = 0;
+    uint64_t denseHostBytes = 0;
+    int denseCpuRows = 16;
+    float* hostDenseOut = nullptr;
+    uint64_t mappedDenseOut = 0;
     uint64_t halfRoom = 0;
     uint64_t wideRows = 0;
     uint64_t wideRoom = 0;
@@ -1457,14 +1463,66 @@ struct GpuModel {
         tables = {table, table + 2048, table + 6144, table + 14336, table + 15360, table + 17408, table + 17536, table + 17552};
 
         for(auto& w : wanted) denseBytes += (w.first->bytes + 255) / 256 * 256;
-        uint64_t arena = grab(denseBytes + 256);
+
+        // un denso que no entra en la vram deja la mlp de sus ultimas capas en ram fijada y la gpu la lee de ahi por pcie
+        // igual que los expertos fijados de los moe: entra en tarjetas chicas y escribe mas lento
+        std::vector<bool> onHost(wanted.size(), false);
+        denseHostBytes = 0;
+        if(dense){
+            uint64_t attentionLayers = 0;
+            for(int l = firstLayer; l < endLayer; l++) attentionLayers += layers[l].attention ? 1 : 0;
+            uint64_t keep = (uint64_t)std::min(contextLimit, 32768) * attentionLayers * 2 * kvHeads * headWidth * 9 / 8 + (1536ULL << 20);
+            size_t freeNow = 0, totalNow = 0;
+            cudaLink().info(&freeNow, &totalNow);
+            uint64_t room = vramCap > 0
+                ? std::min<uint64_t>(freeNow, vramCap > grabbed ? vramCap - grabbed : 0)
+                : freeNow;
+            room = room > keep ? room - keep : 0;
+            std::vector<size_t> order;
+            for(size_t i = 0; i < wanted.size(); i++){
+                const std::string& name = wanted[i].first->name;
+                if(wanted[i].first->layer >= 0 && (name.find("ffn_gate.weight") != std::string::npos || name.find("ffn_up.weight") != std::string::npos || name.find("ffn_down.weight") != std::string::npos)) order.push_back(i);
+            }
+            std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b){ return wanted[a].first->layer > wanted[b].first->layer; });
+            uint64_t onCard = denseBytes;
+            for(size_t k = 0; k < order.size() && onCard > room;){
+                int layer = wanted[order[k]].first->layer;
+                for(; k < order.size() && wanted[order[k]].first->layer == layer; k++){
+                    uint64_t bytes = (wanted[order[k]].first->bytes + 255) / 256 * 256;
+                    onHost[order[k]] = true;
+                    onCard -= bytes;
+                    denseHostBytes += bytes;
+                }
+            }
+            if(denseHostBytes) std::cout << "the dense model does not fit in video memory: " << (denseHostBytes >> 20) << " MB of its feed forward stay in pinned ram and the gpu reads them from there, " << (onCard >> 20) << " MB on the card" << std::endl;
+        }
+
+        uint64_t arena = grab(denseBytes - denseHostBytes + 256);
         if(!arena) return false;
-        uint64_t used = 0;
-        std::vector<std::array<uint64_t, 4>> reads;
-        for(auto& w : wanted){
+        void* hostBlock = nullptr;
+        uint64_t hostAlias = 0;
+        if(denseHostBytes){
+            if(cudaLink().hostAlloc(&hostBlock, (size_t)denseHostBytes, 3) != 0 || queue.hostDevice(&hostAlias, hostBlock, 0) != 0){
+                problem = "the dense model needs " + std::to_string(denseHostBytes >> 20) + " MB of pinned ram for the layers that do not fit in video memory and windows did not give it";
+                return false;
+            }
+            hostBytes += denseHostBytes;
+            pinned.push_back(hostBlock);
+        }
+        uint64_t used = 0, hostUsed = 0;
+        std::vector<std::array<uint64_t, 4>> reads, denseHostReads;
+        for(size_t i = 0; i < wanted.size(); i++){
+            auto& w = wanted[i];
+            uint64_t bytes = (w.first->bytes + 255) / 256 * 256;
+            if(onHost[i]){
+                *w.second = hostAlias + hostUsed;
+                denseHostReads.push_back({w.first->file, w.first->offset, w.first->bytes, (uint64_t)hostBlock + hostUsed});
+                hostUsed += bytes;
+                continue;
+            }
             *w.second = arena + used;
             reads.push_back({w.first->file, w.first->offset, w.first->bytes, arena + used});
-            used += (w.first->bytes + 255) / 256 * 256;
+            used += bytes;
         }
         if(stopLoading){
             problem = "loading stopped";
@@ -1473,6 +1531,24 @@ struct GpuModel {
         loadSay("Reading the weights into video memory");
         if(!fetchAll(reads)) return false;
         reads.clear();
+        if(!denseHostReads.empty()){
+            loadSay("Copying the layers that do not fit to RAM");
+            if(!fetchAll(denseHostReads, true)) return false;
+            auto onCpu = [&](const GpuMatrix& m, Matrix& out) {
+                if(m.data < hostAlias || m.data >= hostAlias + denseHostBytes) return false;
+                out.data = (const uint8_t*)hostBlock + (m.data - hostAlias);
+                out.type = m.type;
+                out.cols = m.cols;
+                out.rows = m.rows;
+                out.stride = m.stride;
+                return true;
+            };
+            for(int l = firstLayer; l < endLayer; l++){
+                GpuLayer& L = layers[l];
+                L.hostFfn = onCpu(L.sharedGate, L.hostGate) && onCpu(L.sharedUp, L.hostUp) && onCpu(L.sharedDown, L.hostDown)
+                    && hostDotType(L.hostGate.type) && hostDotType(L.hostUp.type) && hostDotType(L.hostDown.type);
+            }
+        }
         for(auto& n : narrowed){
             *n.second = grab(n.first.size() * 2);
             if(!*n.second || cudaLink().copyUp(*n.second, n.first.data(), n.first.size() * 2) != 0) return false;
@@ -1696,6 +1772,12 @@ struct GpuModel {
         cpuGather.assign(layers.size(), 0.0);
         cpuSeen.assign(layers.size(), 0);
         spillCounts = grab((uint64_t)layers.size() * 4);
+        if(dense && denseHostBytes && spillCounts){
+            hostDenseOut = (float*)exchange(C * hidden * 4, mappedDenseOut);
+            std::vector<int> waits(layers.size(), 0);
+            for(int l = firstLayer; l < endLayer; l++) waits[l] = layers[l].hostFfn ? 1 : 0;
+            if(cudaLink().copyUp(spillCounts, waits.data(), waits.size() * 4) != 0) problem = "cannot mark the layers the cpu computes";
+        }
         if(hostFlags){
             for(int i = 0; i < 64; i++) hostFlags[i] = 0;
         }
@@ -4478,7 +4560,18 @@ struct GpuModel {
         if(relay && timing) go("stampTime", 1, 1, 1, 1, mappedTimeline + 32ULL * l);
     }
 
-    void feedForward(GpuLayer& L, int n) {
+    bool cpuFeeds(const GpuLayer& L, int n) const {
+        return L.hostFfn && relay && hostDenseOut && n <= denseCpuRows;
+    }
+
+    void feedForward(GpuLayer& L, int l, int n) {
+        if(cpuFeeds(L, n)){
+            go("copyWords", (unsigned int)((n * hidden + 255) / 256), 1, 256, 1, x, mappedX, n * hidden);
+            go("tellHost", 1, 1, 1, 1, mappedFlags + 64, mappedFlags, l);
+            go("awaitHost", 1, 1, 1, 1, mappedFlags + 128, mappedFlags, l, spillCounts + 4ULL * l, mappedFlags + 192, mappedFlags + 160);
+            go("copyWords", (unsigned int)((n * hidden + 255) / 256), 1, 256, 1, mappedDenseOut, shared, n * hidden);
+            return;
+        }
         pack(x, n * hidden, 0);
         projectMany({{&L.sharedGate, sharedGateOut}, {&L.sharedUp, sharedUpOut}}, x, 0, n);
         swigluPack(sharedGateOut, sharedUpOut, sharedHidden, n * expertWidth, 1);
@@ -5381,7 +5474,7 @@ struct GpuModel {
         if(L.attention) attend(L, n, top);
         else deltaNet(L, n);
         mix(L.hcNorm[1], L.hcDown[1], L.hcUp[1], &L.hcInject[1], stack, n, x, inj, y);
-        if(dense) feedForward(L, n);
+        if(dense) feedForward(L, l, n);
         else route(L, l, n);
     }
 
@@ -6226,6 +6319,13 @@ struct GpuModel {
             recorded = false;
         }
         if(!recorded && dense) work();
+        if(dense && hostDenseOut && n <= denseCpuRows){
+            // windows junta el trabajo de la gpu en el driver: sin pedirlo el final del paso no sale y la cpu espera para siempre
+            queue.query(stream);
+            for(int l = firstLayer; l < endLayer; l++){
+                if(layers[l].hostFfn && !serveDense(l, n)) break;
+            }
+        }
         if(!recorded && !dense){
             for(int l = firstLayer; l < endLayer; l++){
                 front(layers[l], l, n, top);
@@ -6257,6 +6357,41 @@ struct GpuModel {
             if(!serve(l, n)) break;
         }
         relayRows = 0;
+    }
+
+    bool serveDense(int l, int n) {
+        GpuLayer& L = layers[l];
+        uint32_t want = ticket * 64u + (uint32_t)l + 1u;
+        auto clock = std::chrono::steady_clock::now();
+        uint32_t spins = 0;
+        while(hostFlags[16] < want){
+            _mm_pause();
+            if(++spins % 4096 == 0) cudaQueue().query(stream);
+            if(since(clock) > 20000.0){
+                if(!failed) launchProblem = "the gpu never reached layer " + std::to_string(l) + " (its last signal was " + std::to_string((long long)hostFlags[16] - (long long)ticket * 64 - 1) + ", ticket " + std::to_string(ticket) + ", rows " + std::to_string(n) + ")";
+                failed = true;
+                _mm_sfence();
+                hostFlags[32] = ticket * 64u + 64u;
+                return false;
+            }
+        }
+        waitMs += since(clock);
+        hostFlags[40] = want;
+        _mm_sfence();
+        auto started = std::chrono::steady_clock::now();
+        hostInput.fill(hostX, n * hidden);
+        cpuGate.resize((size_t)n * expertWidth);
+        cpuUp.resize((size_t)n * expertWidth);
+        std::vector<HostProduct> work = {{L.hostGate, &hostInput, 0, cpuGate.data(), n}, {L.hostUp, &hostInput, 0, cpuUp.data(), n}};
+        hostMultiply(pool, work, residual);
+        hostSwiglu(cpuGate.data(), cpuUp.data(), cpuGate.size());
+        hostHidden.fill(cpuGate.data(), n * expertWidth);
+        work = {{L.hostDown, &hostHidden, 0, hostDenseOut, n}};
+        hostMultiply(pool, work, residual);
+        expertMs += since(started);
+        _mm_sfence();
+        hostFlags[32] = want;
+        return true;
     }
 
     bool serve(int l, int n) {

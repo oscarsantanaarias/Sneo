@@ -831,5 +831,7 @@
   "Stopping the load...": "Deteniendo la carga...",
   "{0} · you can write when it is ready": "{0} · puedes escribir cuando esté listo",
   "stopping": "deteniendo",
-  "loading {0}%": "cargando {0}%"
+  "loading {0}%": "cargando {0}%",
+  "The model did not load: {0}": "El modelo no cargó: {0}",
+  "Copying the layers that do not fit to RAM": "Copiando a la RAM las capas que no entran"
 }

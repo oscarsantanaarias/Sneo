@@ -694,7 +694,9 @@ void loadBrain(std::string path, uint64_t ticket) {
         std::cout << "draft layer: " << (brain.gpu->drafting ? (brain.gpu->tiedDraft ? "built into the model" : "loaded") : brain.gpu->draftProblem.empty() ? "not found" : brain.gpu->draftProblem) << std::endl;
         if(brain.gpu->legacy) std::cout << "gpu: no Ampere tensor cores, prompts run on the dp4a tile kernels" << std::endl;
     }
-    if(brain.gpu && brain.gpu->dense) std::cout << "experts: none, the dense model runs whole on the gpu" << std::endl;
+    if(brain.gpu && brain.gpu->dense) std::cout << (brain.gpu->denseHostBytes
+        ? "experts: none, the dense model runs on the gpu and reads " + std::to_string(brain.gpu->denseHostBytes >> 20) + " MB of its layers from pinned ram"
+        : std::string("experts: none, the dense model runs whole on the gpu")) << std::endl;
     if(brain.gpu && brain.gpu->seeing) std::cout << "vision: the picture reader runs on " << brain.gpu->visionCard << std::endl;
     if(brain.gpu && !brain.gpu->seeing && !brain.gpu->visionProblem.empty()) std::cout << "vision: " << brain.gpu->visionProblem << std::endl;
     if(brain.gpu && !brain.gpu->dense) std::cout << "experts: " << brain.gpu->residentExperts << " per layer in vram, " << brain.gpu->warmPerLayer << " per layer pinned in ram (" << (double)brain.gpu->warmPinnedBytes / gib << " GB), placed by "
@@ -2700,6 +2702,7 @@ void handleClient(SOCKET client) {
             std::lock_guard<std::mutex> guard(engine.lock);
             out << "{\"status\":\"ok\",\"currentModel\":" << quoteJson(engine.loaded ? engine.modelPath : "") << ",\"loaded\":" << (engine.loaded ? "true" : "false")
                 << ",\"ready\":" << (brainState == 2 ? "true" : "false") << ",\"warming\":" << (brainState == 1 ? "true" : "false");
+            if(brainState == -1) out << ",\"problem\":" << quoteJson(brainProblem);
             if(brainState == 1){
                 std::lock_guard<std::mutex> step(loadStatus.lock);
                 out << ",\"load\":{\"step\":" << quoteJson(stopLoading ? std::string("Stopping") : loadStatus.step) << ",\"done\":" << loadStatus.done.load() << ",\"total\":" << loadStatus.total.load() << "}";

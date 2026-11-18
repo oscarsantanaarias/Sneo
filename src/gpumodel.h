@@ -631,6 +631,7 @@ struct GpuModel {
         processVram.close();
         if(ready && !hy4) saveHeat();
         if(ready && hy4) hySaveHeat();
+        if(hy4) hyStopUploads();
         if(helper.context) closeHelper();
         warmStop = true;
         if(warmer.joinable()) warmer.join();
@@ -1066,6 +1067,10 @@ struct GpuModel {
     void hyExpertsHost(HyLayer& L, int n, const std::vector<char>& onCpu);
     void hyExperts(int l, int n);
     void hySwapIn(int l, int n, const int* ids);
+    void hyExpertRanges(int key, WIN32_MEMORY_RANGE_ENTRY* out);
+    void hyStartUploads();
+    void hyCollectUploads(bool wait);
+    void hyStopUploads();
     void hyRelayExperts(int l, int n);
     void hyFork();
     void hyBack();

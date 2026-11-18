@@ -693,7 +693,7 @@ void loadBrain(std::string path, uint64_t ticket) {
         brain.gpu->tailSkip = engine.fastRouting ? 7 : 0;
         brain.gpu->foresee = engine.foresee;
         brain.gpu->draftSure = (float)engine.draftSure;
-        std::cout << "routing: " << (!engine.fastRouting ? "exact" : brain.gpu->hy4 ? "fast, missed experts ranked 10 to 16 are skipped" : "fast, missed experts ranked 8 to 10 are skipped") << std::endl;
+        std::cout << "routing: " << (!engine.fastRouting ? "exact" : brain.gpu->hy4 ? "fast, missed experts ranked 9 to 16 are skipped" : "fast, missed experts ranked 8 to 10 are skipped") << std::endl;
         std::cout << "draft layer: " << (brain.gpu->drafting ? (brain.gpu->tiedDraft ? "built into the model" : "loaded") : brain.gpu->draftProblem.empty() ? "not found" : brain.gpu->draftProblem) << std::endl;
         if(brain.gpu->legacy) std::cout << "gpu: no Ampere tensor cores, prompts run on the dp4a tile kernels" << std::endl;
     }

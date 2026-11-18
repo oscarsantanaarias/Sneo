@@ -3,6 +3,11 @@
 #include "kernels.h"
 #include <vector>
 #include <string>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <condition_variable>
 
 // hy_v4_flash: cuatro corrientes residuales, atencion mla con sumideros, expertos en un ancho latente y tablas engram de n-gramas
 struct HyLayer {
@@ -76,6 +81,27 @@ struct HyShape {
 };
 
 // los expertos mas usados viven en la vram y el resto lo calcula la cpu en la misma capa
+// subidas a la vram en segundo plano: un hilo copia el experto a ram fijada y de ahi a su lugar por su propia cola
+// el lugar queda fuera del mapa mientras viaja y el experto entra al mapa recien cuando termino de subir
+// cada encargo trae el experto que sube, su lugar y el que salio de ahi: ese pasa a la cpu y sus paginas se traen a la ram
+struct HyUploadJob {
+    int key = -1, slot = -1, old = -1;
+};
+
+struct HyUploader {
+    std::thread worker;
+    std::mutex lock;
+    std::condition_variable wake;
+    std::deque<HyUploadJob> waiting;
+    // los que salieron de la vram: el hilo pide sus paginas antes de seguir con las copias
+    std::vector<int> evicted;
+    std::vector<std::pair<int, int>> done;
+    bool stop = false;
+    int busy = 0;
+    void* stream = nullptr;
+    uint8_t* staging = nullptr;
+};
+
 struct HyCache {
     int slots = 0;
     uint64_t slotBytes = 0;
@@ -86,6 +112,11 @@ struct HyCache {
     std::vector<int> free;
     // la copia de slotOf en la gpu que usa el relevo se vuelve a subir cuando cambia
     bool mapDirty = true;
+    // lugares que se estan llenando y expertos que van en camino, y cada cuantos pasos el calor baja a la mitad
+    std::shared_ptr<HyUploader> uploader;
+    std::vector<char> slotBusy, keyPending;
+    int ageEvery = 0;
+    uint64_t aged = 0;
     uint64_t hits = 0, total = 0, uploads = 0, skipped = 0;
     double cpuMs = 0, waitMs = 0, uploadMs = 0, gpuQueueMs = 0;
     // bytes de expertos que leyo la cpu, para ver a cuantos GB/s anda contra la ram
@@ -197,6 +228,8 @@ struct HyBuffers {
     uint64_t wideIds = 0, wideWeights = 0, wideEngram = 0;
     uint64_t wideUploaded = 0;
     double wideUploadMs = 0, wideBatchMs = 0, wideEngramMs = 0, wideLayersMs = 0;
+    // tiempo de cada paso fuera de los expertos: filas engram en la cpu, la cabeza con la espera final y lo que se anota despues
+    double engramMs = 0, headMs = 0, afterMs = 0;
     // subida en dos mitades: la cpu llena una mitad fijada mientras la otra viaja y la gpu calcula
     uint8_t* widePinned = nullptr;
     int* hostWidePairs = nullptr;

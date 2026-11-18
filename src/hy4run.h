@@ -826,14 +826,18 @@ inline bool GpuModel::loadHy4(const std::string& path, int threads) {
         if(cut != std::string::npos) stem = stem.substr(0, cut);
         if(stem.size() > 5 && stem.substr(stem.size() - 5) == ".gguf") stem = stem.substr(0, stem.size() - 5);
         cache.heatPath = (folder / (stem + ".hy4heat")).string();
+        // simulado con 444 pasos grabados en la 3090: calor que baja a la mitad cada 64 pasos y lo guardado tope 64
+        // la vram acierta 60% en vez de 48% y la cpu lee 26% menos expertos, con unas 14 subidas por paso que van en segundo plano
+        cache.ageEvery = b.relayMax > 0 && !getenv("SNEO_HY_SYNC_UPLOADS") ? (getenv("SNEO_HY_AGE") ? atoi(getenv("SNEO_HY_AGE")) : 64) : 0;
+        uint32_t ceiling = cache.ageEvery > 0 ? 64 : 1024;
         FILE* f = fopen(cache.heatPath.c_str(), "rb");
         if(f){
             std::vector<uint32_t> saved(cache.heat.size());
             if(fread(saved.data(), 4, saved.size(), f) == saved.size()){
-                // lo guardado solo ordena el arranque: el mas usado queda en 1024 y lo que se usa ahora reordena rapido
+                // lo guardado solo ordena el arranque: el mas usado queda en el tope y lo que se usa ahora reordena rapido
                 uint32_t top = 0;
                 for(uint32_t v : saved) top = std::max(top, v);
-                double scale = top > 1024 ? 1024.0 / top : 0.5;
+                double scale = top > ceiling ? (double)ceiling / top : 0.5;
                 for(size_t i = 0; i < saved.size(); i++) cache.heat[i] = saved[i] ? (uint32_t)(saved[i] * scale) + 1 : 0;
             }
             fclose(f);
@@ -862,7 +866,17 @@ inline bool GpuModel::loadHy4(const std::string& path, int threads) {
     // medido con la 3090 sola: grabar cada capa en un grafo no cambia la espera de la gpu, va apagado
     b.graphs = getenv("SNEO_HY_GRAPHS") != nullptr;
     cache.cpuRows = getenv("SNEO_HY_CPU_ROWS") ? atoi(getenv("SNEO_HY_CPU_ROWS")) : 192;
-    pool.start(std::max(0, threads - 1));
+    // hilos de los expertos en la cpu: SNEO_HY_CPU_PLAN los fija a nucleos como el camino comun y SNEO_HY_THREADS cambia cuantos
+    const char* planAsked = getenv("SNEO_HY_CPU_PLAN");
+    std::vector<GROUP_AFFINITY> places = planAsked ? coresFor(planAsked) : std::vector<GROUP_AFFINITY>();
+    if(const char* asked = getenv("SNEO_HY_THREADS")) threads = std::max(1, atoi(asked));
+    if(places.size() > 1){
+        if((int)places.size() > threads && getenv("SNEO_HY_THREADS")) places.resize(threads);
+        pool.start((int)places.size() - 1, std::vector<GROUP_AFFINITY>(places.begin() + 1, places.end()));
+    } else pool.start(std::max(0, threads - 1));
+    std::cout << "hy_v4_flash: " << (places.size() > 1 ? places.size() : (size_t)std::max(1, threads)) << " cpu threads for the experts" << (places.size() > 1 ? " fixed to cores (" + std::string(planAsked) + ")" : std::string()) << std::endl;
+    if(cache.ageEvery > 0) hyStartUploads();
+    std::cout << "hy_v4_flash: experts move to the card " << (cache.uploader ? "in the background, heat halves every " + std::to_string(cache.ageEvery) + " steps" : std::string("while it waits")) << std::endl;
     ready = true;
     reset();
     return true;
@@ -1083,6 +1097,13 @@ inline void GpuModel::hyFillWarm() {
 inline void GpuModel::hySaveHeat() {
     if(hyCache.heatPath.empty() || hyCache.total == hyCache.heatSaved) return;
     hyCache.heatSaved = hyCache.total;
+    // un mapa sin nada no pisa al guardado: el 2026-11-18 la app dejo el archivo en ceros y la carga siguiente arrancaba sin expertos
+    size_t warm = 0;
+    for(uint32_t v : hyCache.heat) warm += v ? 1 : 0;
+    if(warm < (size_t)std::max(1, hyCache.slots / 4)){
+        std::cout << "hy_v4_flash: heat map with only " << warm << " used experts after " << hyCache.total << " uses, the saved one is kept" << std::endl;
+        return;
+    }
     std::string temp = hyCache.heatPath + ".part";
     FILE* f = fopen(temp.c_str(), "wb");
     if(!f) return;
@@ -1164,6 +1185,13 @@ inline void GpuModel::hyFillRam() {
     std::cout << "hy_v4_flash: " << chosen.size() << " of " << order.size() << " cpu experts read into ram (" << gb(want) << " GB) in " << (int)seconds << " s, the rest stay on disk until used" << std::endl;
 }
 
+// ram libre en GB para ver en el registro si la ram se llena mientras escribe
+inline double hyRamFreeGb() {
+    MEMORYSTATUSEX mem = {sizeof(mem)};
+    GlobalMemoryStatusEx(&mem);
+    return (double)(mem.ullAvailPhys >> 20) / 1024.0;
+}
+
 // windows junta los lanzamientos en el driver: sin pedirlo la gpu no arranca hasta la proxima espera
 // medido con la 3090 sola: escribiendo codigo de 46-51 a 53-60 tok/s y la espera por la gpu de 26-30 a 18-19 ms por paso
 inline bool hyFlushOn() {
@@ -1173,9 +1201,10 @@ inline bool hyFlushOn() {
 
 // con el enrutado rapido los de menos peso que no estan en la vram no se calculan, como en los otros modelos
 // medido en la 3090 sola: con 9 rangos los que no estan en la vram van de 25 a 37 tok/s escribiendo codigo y la aguja se sigue encontrando
+// con la cache que sigue lo que se usa, 8 rangos dan 68 contra 62 tok/s de codigo y la aguja sigue saliendo
 inline int hyTailRanks(int used, int tailSkip) {
     static const int asked = getenv("SNEO_HY_TAIL") ? atoi(getenv("SNEO_HY_TAIL")) : 0;
-    return asked > 0 ? std::min(used, asked) : tailSkip > 0 ? std::min(used, 9) : used;
+    return asked > 0 ? std::min(used, asked) : tailSkip > 0 ? std::min(used, 8) : used;
 }
 
 inline void GpuModel::hyBatch(HyLayer& L, uint64_t base, const int* slots, const int* pairs, uint64_t slotsOn, uint64_t pairsOn, int count) {
@@ -1369,6 +1398,15 @@ inline void GpuModel::hyExperts(int l, int n) {
     hySwapIn(l, n, b.hostIds);
 }
 
+// compuerta, subida y bajada de un experto en el archivo mapeado
+inline void GpuModel::hyExpertRanges(int key, WIN32_MEMORY_RANGE_ENTRY* out) {
+    int l = key / hyShape.experts, e = key % hyShape.experts;
+    const HyLayer& L = hyLayers[l];
+    out[0] = {(PVOID)(L.hostGate.data + (uint64_t)e * L.gateBytes), (SIZE_T)L.gateBytes};
+    out[1] = {(PVOID)(L.hostUp.data + (uint64_t)e * L.upBytes), (SIZE_T)L.upBytes};
+    out[2] = {(PVOID)(L.hostDown.data + (uint64_t)e * L.downBytes), (SIZE_T)L.downBytes};
+}
+
 // sube a la vram los que fueron a la cpu: primero a lugares libres y despues en lugar de uno menos usado
 inline void GpuModel::hySwapIn(int l, int n, const int* ids) {
     HyShape& s = hyShape;
@@ -1380,20 +1418,33 @@ inline void GpuModel::hySwapIn(int l, int n, const int* ids) {
         int e = ids[i];
         if(e >= 0 && e < s.experts) busy[e] = 1;
     }
+    HyUploader* up = cache.uploader.get();
+    // con el calor que envejece los numeros son chicos: alcanza con ganarle por 2 y un cuarto
+    uint32_t extra = cache.ageEvery > 0 ? 2 : 4;
+    static uint64_t turn = 0;
     int moved = 0;
-    for(int i = 0; i < pairs && moved < cache.budget; i++){
+    std::vector<HyUploadJob> jobs;
+    // con la cola llena no se encarga mas: en el arranque los cambios le sacaban ancho de banda de ram a la cpu
+    size_t queued = 0;
+    if(up){
+        std::lock_guard<std::mutex> guard(up->lock);
+        queued = up->waiting.size();
+    }
+    for(int i = 0; i < pairs && moved < cache.budget && queued + jobs.size() < 48; i++){
         int e = ids[i];
         if(e < 0 || e >= s.experts) continue;
         size_t key = (size_t)l * s.experts + e;
-        if(cache.slotOf[key] >= 0) continue;
+        if(cache.slotOf[key] >= 0 || (up && cache.keyPending[key])) continue;
         int slot = -1;
         if(!cache.free.empty()){
             slot = cache.free.back();
             cache.free.pop_back();
         } else {
             uint32_t mine = cache.heat[key], lowest = mine;
+            turn++;
             for(int k = 0; k < 24; k++){
-                int pick = (int)((cache.uploads * 2654435761ULL + (uint64_t)k * 40503ULL + key) % (uint64_t)cache.slots);
+                int pick = (int)((turn * 2654435761ULL + (uint64_t)k * 40503ULL + key) % (uint64_t)cache.slots);
+                if(up && cache.slotBusy[pick]) continue;
                 int owner = cache.owner[pick];
                 if(owner < 0){
                     slot = pick;
@@ -1402,18 +1453,161 @@ inline void GpuModel::hySwapIn(int l, int n, const int* ids) {
                 int ownerLayer = owner / s.experts;
                 if(ownerLayer == l && busy[owner % s.experts]) continue;
                 uint32_t theirs = cache.heat[owner];
-                if(theirs + 4 + theirs / 4 < mine && theirs < lowest){
+                if(theirs + extra + theirs / 4 < mine && theirs < lowest){
                     lowest = theirs;
                     slot = pick;
                 }
             }
         }
         if(slot < 0) continue;
+        moved++;
+        if(up){
+            // el que estaba sale del mapa ya y el nuevo entra cuando termine de subir
+            // el que sale pasa a la cpu desde el paso siguiente: el hilo de las subidas pide sus paginas antes que cualquier copia
+            int old = cache.owner[slot];
+            if(old >= 0) cache.slotOf[old] = -1;
+            cache.owner[slot] = -1;
+            cache.slotBusy[slot] = 1;
+            cache.keyPending[key] = 1;
+            cache.mapDirty = true;
+            jobs.push_back({(int)key, slot, old});
+            continue;
+        }
         auto upFrom = std::chrono::steady_clock::now();
         hyUpload(l, e, slot);
         cache.uploadMs += since(upFrom);
-        moved++;
     }
+    if(up && !jobs.empty()){
+        {
+            std::lock_guard<std::mutex> guard(up->lock);
+            for(const auto& job : jobs){
+                up->waiting.push_back(job);
+                if(job.old >= 0) up->evicted.push_back(job.old);
+            }
+        }
+        up->wake.notify_one();
+    }
+}
+
+// arranca el hilo de las subidas: ram fijada del tamano de un experto y una cola de copias que no espera a las demas
+inline void GpuModel::hyStartUploads() {
+    HyCache& cache = hyCache;
+    if(cache.uploader || !cache.slots || !cache.slotBytes) return;
+    auto up = std::make_shared<HyUploader>();
+    void* host = nullptr;
+    if(cudaLink().hostAlloc(&host, (size_t)cache.slotBytes, 0) != 0) return;
+    if(cudaQueue().streamCreate(&up->stream, 1) != 0){
+        cudaLink().hostFree(host);
+        return;
+    }
+    pinned.push_back(host);
+    up->staging = (uint8_t*)host;
+    cache.slotBusy.assign(cache.slots, 0);
+    cache.keyPending.assign(cache.slotOf.size(), 0);
+    HyUploader* own = up.get();
+    up->worker = std::thread([this, own]{
+        CudaLink& cu = cudaLink();
+        CudaQueue& queue = cudaQueue();
+        cu.setCurrent(cu.context);
+        HyCache& cache = hyCache;
+        uint32_t sink = 0;
+        std::vector<int> leaving;
+        std::vector<WIN32_MEMORY_RANGE_ENTRY> ranges;
+        while(true){
+            HyUploadJob job;
+            {
+                std::unique_lock<std::mutex> guard(own->lock);
+                own->wake.wait(guard, [&]{ return own->stop || !own->waiting.empty(); });
+                if(own->stop) return;
+                job = own->waiting.front();
+                own->waiting.pop_front();
+                own->busy++;
+                leaving.swap(own->evicted);
+                own->evicted.clear();
+            }
+            // los que salieron de la vram los calcula la cpu desde ahora: si arrancaron en la vram nunca se leyeron a la ram
+            // se piden todos juntos al disco y se tocan aca para que las faltas de pagina las pague este hilo y no los de los expertos
+            if(!leaving.empty()){
+                ranges.resize(leaving.size() * 3);
+                for(size_t i = 0; i < leaving.size(); i++) hyExpertRanges(leaving[i], ranges.data() + i * 3);
+                PrefetchVirtualMemory(GetCurrentProcess(), ranges.size(), ranges.data(), 0);
+                for(const WIN32_MEMORY_RANGE_ENTRY& r : ranges){
+                    const volatile uint8_t* p = (const volatile uint8_t*)r.VirtualAddress;
+                    for(SIZE_T step = 0; step < r.NumberOfBytes; step += 4096) sink += p[step];
+                }
+                leaving.clear();
+            }
+            int l = job.key / hyShape.experts, e = job.key % hyShape.experts;
+            const HyLayer& L = hyLayers[l];
+            uint8_t* at = own->staging;
+            uint64_t upAt = (L.gateBytes + 255) / 256 * 256;
+            uint64_t downAt = upAt + (L.upBytes + 255) / 256 * 256;
+            int warm = cache.warmOf.empty() ? -1 : cache.warmOf[job.key];
+            if(warm >= 0) memcpy(at, cache.warmHost + (uint64_t)warm * cache.slotBytes, (size_t)cache.slotBytes);
+            else {
+                memcpy(at, L.hostGate.data + (uint64_t)e * L.gateBytes, (size_t)L.gateBytes);
+                memcpy(at + upAt, L.hostUp.data + (uint64_t)e * L.upBytes, (size_t)L.upBytes);
+                memcpy(at + downAt, L.hostDown.data + (uint64_t)e * L.downBytes, (size_t)L.downBytes);
+            }
+            uint64_t dst = cache.base + (uint64_t)job.slot * cache.slotBytes;
+            bool ok = queue.copyUp(dst, at, (size_t)cache.slotBytes, own->stream) == 0 && queue.streamSync(own->stream) == 0;
+            // el que subio ya no lo lee la cpu: sus paginas dejan el conjunto de trabajo y la ram queda para los que bajaron
+            // windows las guarda en espera, si vuelve a bajar pronto salen de ahi sin ir al disco
+            if(ok && warm < 0){
+                WIN32_MEMORY_RANGE_ENTRY ranges[3];
+                hyExpertRanges(job.key, ranges);
+                for(const WIN32_MEMORY_RANGE_ENTRY& r : ranges) VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+            }
+            {
+                std::lock_guard<std::mutex> guard(own->lock);
+                own->busy--;
+                own->done.push_back({ok ? job.key : -1 - job.key, job.slot});
+            }
+            own->wake.notify_all();
+        }
+    });
+    cache.uploader = up;
+}
+
+// lo que termino de subir entra al mapa; con wait espera a que no quede nada en camino
+inline void GpuModel::hyCollectUploads(bool wait) {
+    HyCache& cache = hyCache;
+    HyUploader* up = cache.uploader.get();
+    if(!up) return;
+    std::vector<std::pair<int, int>> finished;
+    {
+        std::unique_lock<std::mutex> guard(up->lock);
+        if(wait) up->wake.wait(guard, [&]{ return up->waiting.empty() && up->busy == 0; });
+        finished.swap(up->done);
+    }
+    for(const auto& job : finished){
+        int key = job.first, slot = job.second;
+        cache.slotBusy[slot] = 0;
+        if(key < 0){
+            cache.keyPending[-1 - key] = 0;
+            cache.free.push_back(slot);
+            continue;
+        }
+        cache.keyPending[key] = 0;
+        cache.owner[slot] = key;
+        cache.slotOf[key] = slot;
+        cache.uploads++;
+        cache.mapDirty = true;
+    }
+}
+
+inline void GpuModel::hyStopUploads() {
+    HyUploader* up = hyCache.uploader.get();
+    if(!up) return;
+    {
+        std::lock_guard<std::mutex> guard(up->lock);
+        up->stop = true;
+        up->waiting.clear();
+    }
+    up->wake.notify_all();
+    if(up->worker.joinable()) up->worker.join();
+    if(up->stream) cudaQueue().streamDestroy(up->stream);
+    hyCache.uploader.reset();
 }
 
 // expertos de una capa que estan en la vram, dentro del grafo del relevo, con el plan que dejo la gpu
@@ -1730,6 +1924,8 @@ inline bool GpuModel::hyWide(const int* ids, const int* positions, int n, bool l
         return false;
     }
     // el final de la cache de expertos se presta: los que estaban ahi vuelven a subir cuando se usen
+    // antes terminan las subidas en camino para que ninguna escriba en lo prestado
+    hyCollectUploads(true);
     int from = cache.slots - b.wideBorrow;
     for(int j = from; j < cache.slots; j++){
         if(cache.owner[j] >= 0) cache.slotOf[cache.owner[j]] = -1;
@@ -1863,6 +2059,15 @@ inline bool GpuModel::hyWide(const int* ids, const int* positions, int n, bool l
             hyUpload(order[i] / s.experts, order[i] % s.experts, slot);
         }
     }
+    // el prompt leyo todos los expertos y los de la vram quedaron en la ram: se sueltan para que la ram quede a los de la cpu
+    if(cache.uploader){
+        for(int j = 0; j < cache.slots; j++){
+            if(cache.owner[j] < 0) continue;
+            WIN32_MEMORY_RANGE_ENTRY ranges[3];
+            hyExpertRanges(cache.owner[j], ranges);
+            for(const WIN32_MEMORY_RANGE_ENTRY& r : ranges) VirtualUnlock(r.VirtualAddress, r.NumberOfBytes);
+        }
+    }
     return !failed;
 }
 
@@ -1887,6 +2092,10 @@ inline void GpuModel::hyEngramHost(const int* positions, int n) {
     int cols = s.engramHeads, dim = s.engramDim, gram = s.engramGram;
     int pad = s.engramMap[s.engramPad];
     auto mapped = [&](int id){ return id >= 0 && id < (int)s.engramMap.size() ? s.engramMap[id] : pad; };
+    // primero la fila de la tabla que toca a cada cabeza de cada token
+    size_t perToken = (size_t)s.engramModules * cols;
+    static std::vector<uint64_t> rows;
+    rows.assign((size_t)n * perToken, UINT64_MAX);
     pool.run(n, [&](int t){
         int pos = positions[t];
         uint64_t toks[8];
@@ -1902,12 +2111,29 @@ inline void GpuModel::hyEngramHost(const int* positions, int n) {
                 for(int h = 0; h < s.engramPerGram; h++){
                     int col = (o - 1) * s.engramPerGram + h;
                     size_t at = (size_t)e * cols + col;
-                    uint64_t row = rolling % s.engramPrimes[at] + s.engramOffsets[at];
-                    const uint8_t* src = s.engramTable + row * (uint64_t)dim;
-                    float* dst = b.hostEngram + (((size_t)t * s.engramModules + e) * cols + col) * dim;
-                    for(int k = 0; k < dim; k++) dst[k] = lut[src[k]];
+                    rows[(size_t)t * perToken + at] = rolling % s.engramPrimes[at] + s.engramOffsets[at];
                 }
             }
+        }
+    });
+    // la tabla pesa 59 GB y casi nunca esta en la ram: todas las filas se piden juntas al disco y llegan en paralelo
+    // antes cada hilo esperaba sus filas de a una y con contexto largo eran unos 10 ms por paso
+    static std::vector<WIN32_MEMORY_RANGE_ENTRY> wanted;
+    wanted.clear();
+    for(uint64_t row : rows){
+        if(row != UINT64_MAX) wanted.push_back({(PVOID)(s.engramTable + row * (uint64_t)dim), (SIZE_T)dim});
+    }
+    for(size_t at = 0; at < wanted.size(); at += 4096) PrefetchVirtualMemory(GetCurrentProcess(), std::min<size_t>(4096, wanted.size() - at), wanted.data() + at, 0);
+    pool.run((int)std::min<size_t>(rows.size(), (size_t)n * 8), [&](int part){
+        int parts = (int)std::min<size_t>(rows.size(), (size_t)n * 8);
+        for(size_t i = part; i < rows.size(); i += parts){
+            uint64_t row = rows[i];
+            if(row == UINT64_MAX) continue;
+            size_t t = i / perToken, at = i % perToken;
+            size_t e = at / cols, col = at % cols;
+            const uint8_t* src = s.engramTable + row * (uint64_t)dim;
+            float* dst = b.hostEngram + ((t * s.engramModules + e) * cols + col) * dim;
+            for(int k = 0; k < dim; k++) dst[k] = lut[src[k]];
         }
     });
 }
@@ -2250,7 +2476,8 @@ inline bool GpuModel::hyChunk(const int* ids, const int* positions, int n, bool 
     HyBuffers& b = hyBuffers;
     CudaQueue& queue = cudaQueue();
     int d = s.hidden;
-    if(cudaLink().sync() != 0) failed = true;
+    // solo la cola principal: las subidas en segundo plano siguen por la suya
+    if(waitStream() != 0) failed = true;
     pool.run(n, [&](int t){
         int id = ids[t];
         if(id < 0 || id >= embed.rows) id = 0;
@@ -2262,7 +2489,9 @@ inline bool GpuModel::hyChunk(const int* ids, const int* positions, int n, bool 
         b.hostPositions[t] = positions[t];
         hyTop = std::max(hyTop, positions[t]);
     }
+    auto engramFrom = std::chrono::steady_clock::now();
     if(b.hostEngram) hyEngramHost(positions, n);
+    b.engramMs += since(engramFrom);
     if(queue.copyUp(b.positions, b.hostPositions, (size_t)n * 4, stream) != 0) failed = true;
     if(last && !failed && hyRelay(n)) return !failed;
     go("hySpread", (unsigned int)n, 1, 256, 1, b.mappedEmbed, b.streams, d, s.hc);
@@ -2347,6 +2576,7 @@ inline bool GpuModel::hyRelay(int n) {
     bool scored = s.indexed && (hyTop >> 2) > s.idxKeep;
     int key = (1 << 26) | (n << 8) | (tail << 1) | (scored ? 1 : 0);
     if(graphless.count(key)) return false;
+    hyCollectUploads(false);
     if(cache.mapDirty){
         if(cudaLink().copyUp(b.slotMap, cache.slotOf.data(), cache.slotOf.size() * 4) != 0) return false;
         cache.mapDirty = false;
@@ -2415,10 +2645,13 @@ inline bool GpuModel::hyRelay(int n) {
         flags[32] = ticket * 64u + 64u;
         _mm_sfence();
     }
+    auto headFrom = std::chrono::steady_clock::now();
     if(!failed) hyHead(n);
     if(!hyRouted && queue.eventCreate(&hyRouted, 2) != 0) failed = true;
     if(queue.eventRecord(hyRouted, stream) != 0 || queue.eventSync(hyRouted) != 0) failed = true;
     if(failed) return true;
+    b.headMs += since(headFrom);
+    auto afterFrom = std::chrono::steady_clock::now();
     if(flags[48] != 0){
         flags[48] = 0;
         b.relayRetries++;
@@ -2448,9 +2681,23 @@ inline bool GpuModel::hyRelay(int n) {
             else if(i % used >= tail) cache.skipped++;
         }
     }
+    if(cache.ageEvery > 0 && ++cache.aged % (uint64_t)cache.ageEvery == 0){
+        for(uint32_t& h : cache.heat) h >>= 1;
+    }
+    // con SNEO_HY_TRACE se anota que expertos uso cada capa en cada paso para probar politicas de la cache aparte
+    static FILE* trace = getenv("SNEO_HY_TRACE") ? fopen(getenv("SNEO_HY_TRACE"), "wb") : nullptr;
+    if(trace){
+        int top[3] = {n, used, tail};
+        fwrite(top, 4, 3, trace);
+        for(int l = 0; l < s.layers; l++){
+            if(!hyLayers[l].dense) fwrite(b.hostRelayIds + (size_t)l * b.relayPairs, 4, pairs, trace);
+        }
+        fflush(trace);
+    }
     for(int l = 0; l < s.layers && !failed; l++){
         if(!hyLayers[l].dense) hySwapIn(l, n, b.hostRelayIds + (size_t)l * b.relayPairs);
     }
+    b.afterMs += since(afterFrom);
     return true;
 }
 
@@ -2500,7 +2747,7 @@ inline std::vector<float> GpuModel::forwardHy4(const std::vector<int>& ids, cons
         b.ringTop = std::max(b.ringTop, positions[at + n - 1]);
         at += n;
     }
-    int code = cudaLink().sync();
+    int code = waitStream();
     if(stopGenerating && !failed){
         problem = "stopped";
         return logits;
@@ -2521,13 +2768,14 @@ inline std::vector<float> GpuModel::forwardHy4(const std::vector<int>& ids, cons
     headMs = since(clock);
     static int calls = 0;
     if(hyCache.total - hyCache.heatSaved > 200000) hySaveHeat();
-    if(ids.size() > 1 || ++calls % 64 == 0) std::cout << "hy_v4_flash: experts found in video memory " << (hyCache.total ? 100 * hyCache.hits / hyCache.total : 0) << "% of " << hyCache.total << ", graph runs " << b.graphRuns << ", one launch steps " << b.relaySteps << " (retried " << b.relayRetries << ")" << ", drafter proposed " << hyDraft.proposed << " (cut " << hyDraft.cut << " unsure, sparse " << hyDraft.sparseSteps << ") in " << (int)hyDraft.ms << " ms, steps " << hyDraft.steps << " first right " << hyDraft.firstKept << " kept " << hyDraft.kept << ", on the second card " << hyCache.helpUsed << " (" << (int)hyCache.helpMs << " ms waiting)" << ", from pinned ram " << hyCache.warmUsed << ", skipped " << hyCache.skipped << ", uploads " << hyCache.uploads << ", free slots " << hyCache.free.size() << ", ms in this call: total " << since(clock) << " cpu experts " << hyCache.cpuMs << " (" << (int)(hyCache.cpuBytes / 1048576.0 / std::max(0.001, hyCache.cpuMs)) << " GB/s; prep " << (int)hyCache.stageMs[0] << " gate+up " << (int)hyCache.stageMs[1] << " ms at " << (int)(hyCache.stageBytes[0] / 1048576.0 / std::max(0.001, hyCache.stageMs[1])) << " GB/s, act " << (int)hyCache.stageMs[2] << " pack " << (int)hyCache.stageMs[3] << " down " << (int)hyCache.stageMs[4] << " ms at " << (int)(hyCache.stageBytes[1] / 1048576.0 / std::max(0.001, hyCache.stageMs[4])) << " GB/s, sum " << (int)hyCache.stageMs[5] << ")" << " waiting for the gpu " << hyCache.waitMs << " uploads " << hyCache.uploadMs << std::endl;
+    if(ids.size() > 1 || ++calls % 64 == 0) std::cout << "hy_v4_flash: experts found in video memory " << (hyCache.total ? 100 * hyCache.hits / hyCache.total : 0) << "% of " << hyCache.total << ", graph runs " << b.graphRuns << ", one launch steps " << b.relaySteps << " (retried " << b.relayRetries << ")" << ", ram free " << hyRamFreeGb() << " GB, engram " << (int)b.engramMs << " ms, head " << (int)b.headMs << " ms, after " << (int)b.afterMs << " ms" << ", drafter proposed " << hyDraft.proposed << " (cut " << hyDraft.cut << " unsure, sparse " << hyDraft.sparseSteps << ") in " << (int)hyDraft.ms << " ms, steps " << hyDraft.steps << " first right " << hyDraft.firstKept << " kept " << hyDraft.kept << ", on the second card " << hyCache.helpUsed << " (" << (int)hyCache.helpMs << " ms waiting)" << ", from pinned ram " << hyCache.warmUsed << ", skipped " << hyCache.skipped << ", uploads " << hyCache.uploads << ", free slots " << hyCache.free.size() << ", ms in this call: total " << since(clock) << " cpu experts " << hyCache.cpuMs << " (" << (int)(hyCache.cpuBytes / 1048576.0 / std::max(0.001, hyCache.cpuMs)) << " GB/s; prep " << (int)hyCache.stageMs[0] << " gate+up " << (int)hyCache.stageMs[1] << " ms at " << (int)(hyCache.stageBytes[0] / 1048576.0 / std::max(0.001, hyCache.stageMs[1])) << " GB/s, act " << (int)hyCache.stageMs[2] << " pack " << (int)hyCache.stageMs[3] << " down " << (int)hyCache.stageMs[4] << " ms at " << (int)(hyCache.stageBytes[1] / 1048576.0 / std::max(0.001, hyCache.stageMs[4])) << " GB/s, sum " << (int)hyCache.stageMs[5] << ")" << " waiting for the gpu " << hyCache.waitMs << " uploads " << hyCache.uploadMs << std::endl;
     bool wideCall = b.wideUploaded > 0;
     if(wideCall) std::cout << "hy_v4_flash: prompt on the gpu, experts uploaded " << (b.wideUploaded >> 20) << " MB, cpu copying " << (int)b.wideUploadMs << " ms (" << (int)(b.wideUploaded / 1048576.0 / std::max(1.0, b.wideUploadMs)) << " GB/s), experts " << (int)b.wideBatchMs << " ms, attention and the rest of the layers " << (int)b.wideLayersMs << " ms, engram rows " << (int)b.wideEngramMs << " ms, whole call " << (int)since(clock) << " ms" << std::endl;
     b.wideUploaded = 0;
     b.wideUploadMs = b.wideBatchMs = b.wideLayersMs = b.wideEngramMs = 0;
     if(ids.size() > 1 || calls % 64 == 0){
         hyCache.cpuMs = hyCache.waitMs = hyCache.uploadMs = 0;
+        b.engramMs = b.headMs = b.afterMs = 0;
         hyCache.cpuBytes = 0;
         for(double& ms : hyCache.stageMs) ms = 0;
         hyCache.stageBytes[0] = hyCache.stageBytes[1] = 0;

@@ -63,7 +63,7 @@ Tencent's Hy4-flash runs in Sneo. It is big: 157 GB at Q4_K_M and 12B active par
 - For faster writing, make a `dfly2` folder next to them and put `model-00148-of-00148.safetensors` from [tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) in it (1.7 GB). That file holds DFly2, the model's own draft layers. Without it Hy4 still runs, only slower.
 - The first load after an update builds the GPU kernels, about a minute more; after that a load takes about a minute. The experts used most stay on the card and the list is kept in `profiles\Hy4-flash-Q4_K_M.hy4heat`, so it starts warm and gets faster as you use it.
 
-Each step of writing goes to the card in one launch: the card stops at every layer that needs experts from RAM, the CPU computes them and hands them back through shared memory, without going back to the driver. On an RTX 3090 with 96 GB of DDR5 it reads long prompts at 400 to 500 tok/s, writes code at 55 to 65 tok/s and prose at about 40 tok/s after a 10K token prompt. Tool calls work with the coding agent.
+Each step of writing goes to the card in one launch: the card stops at every layer that needs experts from RAM, the CPU computes them and hands them back through shared memory, without going back to the driver. The experts you use move to the card in the background while it writes, so the card keeps the ones your work needs. On an RTX 3090 with 96 GB of DDR5 it reads long prompts at 400 to 500 tok/s, writes code at 60 to 75 tok/s, code at about 60 tok/s with a 10K token prompt like the coding agent's, and prose at about 40 tok/s after a 10K token prompt. Tool calls work with the coding agent.
 
 ### Where to put them
 

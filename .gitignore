@@ -34,3 +34,7 @@ MiEstilo.MD
 bench/
 laptop_worker/
 profiles/*.heat.*
+train/venv/
+train/data/
+train/runs/
+train/sources/

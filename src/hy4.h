@@ -84,6 +84,8 @@ struct HyCache {
     std::vector<int> owner;
     std::vector<uint32_t> heat;
     std::vector<int> free;
+    // la copia de slotOf en la gpu que usa el relevo se vuelve a subir cuando cambia
+    bool mapDirty = true;
     uint64_t hits = 0, total = 0, uploads = 0, skipped = 0;
     double cpuMs = 0, waitMs = 0, uploadMs = 0, gpuQueueMs = 0;
     // bytes de expertos que leyo la cpu, para ver a cuantos GB/s anda contra la ram
@@ -219,7 +221,35 @@ struct HyBuffers {
     uint64_t q16 = 0, lat16 = 0;
     uint64_t wideInValues = 0, wideInScales = 0, wideInSums = 0;
     uint64_t wideGate = 0, wideUp = 0, wideHid = 0, wideHidValues = 0, wideHidScales = 0, wideHidSums = 0;
+    // relevo: con pocas filas el paso entero va en un grafo y la cpu atiende cada capa cuando la gpu le avisa por memoria compartida
+    // banderas como las del camino comun: [0] turno, [16] capa a la que llego la gpu, [32] capa que termino la cpu, [40] la que esta calculando, [48] alarma
+    int relayMax = 0, relayPairs = 0, relayTail = 0;
+    uint64_t relayDevIds = 0, relayDevWeights = 0, relayHits = 0, relaySpill = 0, slotMap = 0;
+    uint64_t relayIds = 0, relayWeights = 0, relayCpu = 0, relayFlagsOn = 0;
+    int* hostRelayIds = nullptr;
+    float* hostRelayWeights = nullptr;
+    int* hostRelayCpu = nullptr;
+    volatile uint32_t* relayFlags = nullptr;
+    uint32_t ticket = 0;
+    bool relaying = false;
+    uint64_t relaySteps = 0, relayRetries = 0;
+    // segunda cola dentro del grafo del relevo: lo que no depende entre si corre a la vez y llena mejor la tarjeta
+    void* relaySide = nullptr;
+    void* forkEvent = nullptr;
+    void* joinEvent = nullptr;
 };
+
+// posiciones seguidas que mira cada warp en la atencion: tramos cortos dan mas bloques a la vez y cadenas mas cortas
+inline int hySpanLeast() {
+    static const int least = getenv("SNEO_HY_SPAN") ? std::max(8, atoi(getenv("SNEO_HY_SPAN"))) : 64;
+    return least;
+}
+
+// atencion en dos pasos por tramo: va con SNEO_HY_NEW_ATTEND hasta medirla contra la de una posicion por vuelta
+inline const char* hyAttendName(bool list) {
+    static const bool fresh = getenv("SNEO_HY_NEW_ATTEND") != nullptr;
+    return list ? (fresh ? "hyAttendList2" : "hyAttendList") : (fresh ? "hyAttendPart2" : "hyAttendPart");
+}
 
 const char* hyKernelSource = R"(
 __device__ __forceinline__ float hyHalf(u16 h) {
@@ -892,57 +922,120 @@ extern "C" __global__ void hyAttendList(const float* qfull, const u16* cache, co
     for(int k = 0; k < 16; k++) dst[2 + lane + 32 * k] = acc[k];
 }
 
-// enrutado con los 512 hilos buscando el mejor en cada vuelta
+// atencion de un tramo en dos pasos: cada hilo saca el puntaje de una posicion entera, asi las lecturas de 32 filas salen juntas
+// despues el warp junta los valores de esas 32 con su peso, cada hilo 16 columnas seguidas
+// el resultado queda igual que antes en la memoria de paso: mayor, total y las 512 columnas
+__device__ __forceinline__ float hyHalfAt(const uint4& w, int e) {
+    unsigned int word = e < 2 ? w.x : e < 4 ? w.y : e < 6 ? w.z : w.w;
+    return hyHalf((u16)((e & 1) ? (word >> 16) : (word & 0xffffu)));
+}
+
+__device__ __forceinline__ void hyAttendSpan(const float* q, const u16* cache, const int* picks, int ring, int first, int last, float scale, float* dst, float* qs) {
+    int lane = threadIdx.x & 31;
+    #pragma unroll
+    for(int k = 0; k < 18; k++) qs[lane + 32 * k] = q[lane + 32 * k];
+    __syncwarp();
+    float acc[16];
+    #pragma unroll
+    for(int k = 0; k < 16; k++) acc[k] = 0.0f;
+    float best = -1e30f, total = 0.0f;
+    for(int from = first; from <= last; from += 32){
+        int j = from + lane;
+        bool live = j <= last;
+        int at = live ? (picks ? picks[j] : ring > 0 ? j % ring : j) : 0;
+        float dot = -1e30f;
+        if(live){
+            const uint4* row = (const uint4*)(cache + (u64)at * 576);
+            float sum = 0.0f;
+            #pragma unroll 8
+            for(int v = 0; v < 72; v++){
+                uint4 w = row[v];
+                #pragma unroll
+                for(int e = 0; e < 8; e++) sum += qs[v * 8 + e] * hyHalfAt(w, e);
+            }
+            dot = sum * scale;
+        }
+        float top = dot;
+        for(int s = 16; s > 0; s >>= 1) top = fmaxf(top, __shfl_xor_sync(0xffffffff, top, s));
+        top = fmaxf(top, best);
+        float p = live ? __expf(dot - top) : 0.0f;
+        float keep = __expf(best - top);
+        float sum = p;
+        for(int s = 16; s > 0; s >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, s);
+        total = total * keep + sum;
+        #pragma unroll
+        for(int k = 0; k < 16; k++) acc[k] *= keep;
+        int count = min(32, last - from + 1);
+        for(int i = 0; i < count; i++){
+            float pi = __shfl_sync(0xffffffff, p, i);
+            int ai = __shfl_sync(0xffffffff, at, i);
+            const uint4* row = (const uint4*)(cache + (u64)ai * 576 + lane * 16);
+            uint4 w0 = row[0], w1 = row[1];
+            #pragma unroll
+            for(int e = 0; e < 8; e++){
+                acc[e] += pi * hyHalfAt(w0, e);
+                acc[8 + e] += pi * hyHalfAt(w1, e);
+            }
+        }
+        best = top;
+    }
+    if(lane == 0){
+        dst[0] = best;
+        dst[1] = total;
+    }
+    #pragma unroll
+    for(int k = 0; k < 16; k++) dst[2 + lane * 16 + k] = acc[k];
+}
+
+extern "C" __global__ void hyAttendPart2(const float* qfull, const u16* cache, int ring, const int* positions, float* scratch, int heads, int window, float scale, int span, int splits) {
+    __shared__ float qs[8][576];
+    int warp = threadIdx.x >> 5;
+    int h = blockIdx.x * 8 + warp, t = blockIdx.y / splits, part = blockIdx.y % splits;
+    if(h >= heads) return;
+    float* dst = scratch + (((u64)t * heads + h) * splits + part) * 514;
+    int pos = positions[t];
+    int lo = window > 0 ? max(0, pos - window + 1) : 0;
+    int first = lo + part * span;
+    int last = min(pos, first + span - 1);
+    hyAttendSpan(qfull + ((u64)t * heads + h) * 576, cache, nullptr, ring, first, last, scale, dst, qs[warp]);
+}
+
+extern "C" __global__ void hyAttendList2(const float* qfull, const u16* cache, const int* list, const int* counts, int width, float* scratch, int heads, float scale, int span, int splits) {
+    __shared__ float qs[8][576];
+    int warp = threadIdx.x >> 5;
+    int h = blockIdx.x * 8 + warp, t = blockIdx.y / splits, part = blockIdx.y % splits;
+    if(h >= heads) return;
+    float* dst = scratch + (((u64)t * heads + h) * splits + part) * 514;
+    int first = part * span;
+    int last = min(counts[t], first + span) - 1;
+    hyAttendSpan(qfull + ((u64)t * heads + h) * 576, cache, list + (u64)t * width, 0, first, last, scale, dst, qs[warp]);
+}
+
+// enrutado: cada hilo cuenta cuantos expertos le ganan al suyo y ese es su puesto
+// mismo orden que buscar el mayor dieciseis veces, de mayor a menor y el de indice menor en los empates, sin esperas entre vueltas
 extern "C" __global__ void hyRouteFast(const float* logits, const float* bias, int* ids, float* weights, int experts, int used, float scale, int norm) {
     __shared__ float prob[1024];
     __shared__ float pick[1024];
-    __shared__ float bestValue[32];
-    __shared__ int bestAt[32];
     __shared__ int chosen[32];
     int t = blockIdx.x;
-    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, warps = blockDim.x >> 5;
     for(int e = threadIdx.x; e < experts; e += blockDim.x){
         float p = hySigmoid(logits[(u64)t * experts + e]);
         prob[e] = p;
-        pick[e] = p + (bias ? bias[e] : 0.0f);
+        float v = p + (bias ? bias[e] : 0.0f);
+        pick[e] = v == v ? v : -1e30f;
+    }
+    if(threadIdx.x < 32) chosen[threadIdx.x] = 0;
+    __syncthreads();
+    for(int e = threadIdx.x; e < experts; e += blockDim.x){
+        float v = pick[e];
+        int rank = 0;
+        for(int o = 0; o < experts && rank < used; o++){
+            float w = pick[o];
+            rank += (w > v || (w == v && o < e)) ? 1 : 0;
+        }
+        if(rank < used) chosen[rank] = e;
     }
     __syncthreads();
-    for(int k = 0; k < used; k++){
-        float v = -1e30f;
-        int at = 0x7fffffff;
-        for(int e = threadIdx.x; e < experts; e += blockDim.x){
-            if(pick[e] > v || (pick[e] == v && e < at)){
-                v = pick[e];
-                at = e;
-            }
-        }
-        for(int s = 16; s > 0; s >>= 1){
-            float ov = __shfl_xor_sync(0xffffffff, v, s);
-            int oa = __shfl_xor_sync(0xffffffff, at, s);
-            if(ov > v || (ov == v && oa < at)){
-                v = ov;
-                at = oa;
-            }
-        }
-        if(lane == 0){
-            bestValue[warp] = v;
-            bestAt[warp] = at;
-        }
-        __syncthreads();
-        if(threadIdx.x == 0){
-            float bv = bestValue[0];
-            int ba = bestAt[0];
-            for(int w = 1; w < warps; w++){
-                if(bestValue[w] > bv || (bestValue[w] == bv && bestAt[w] < ba)){
-                    bv = bestValue[w];
-                    ba = bestAt[w];
-                }
-            }
-            chosen[k] = ba;
-            pick[ba] = -1e30f;
-        }
-        __syncthreads();
-    }
     if(threadIdx.x != 0) return;
     float sum = 0.0f;
     for(int k = 0; k < used; k++) sum += prob[chosen[k]];
@@ -1267,5 +1360,98 @@ extern "C" __global__ void hyEngramMix(float* streams, const float* kv, const fl
         float signal = (row[(u64)hc * hidden + c] + bias[(u64)hc * hidden + c]) * invValue * gamma[c];
         for(int i = 0; i < hc; i++) s[(u64)i * hidden + c] += signal * (gates[i] + hcScale[(u64)i * hidden + c]);
     }
+}
+
+// relevo: el reparto de cada capa sale en la gpu sin volver al host
+// hits: [0] cuantos, [1..most] lugar en la vram y [1+most..] par; cpu: [0] cuantos y [1..] pares, en la memoria que lee la cpu
+// los ids y pesos tambien se copian ahi por capa para que la cpu los lea y cuente el calor al final del paso
+extern "C" __global__ void hyRelayPlan(const int* ids, const float* weights, const int* slotMap, int pairs, int used, int experts, int tail, int* hits, int most, int* hostIds, float* hostWeights, int* cpu, int* spill) {
+    __shared__ int hitWarp[32], cpuWarp[32];
+    int i = threadIdx.x, lane = i & 31, warp = i >> 5;
+    int e = i < pairs ? ids[i] : -1;
+    if(i < pairs){
+        hostIds[i] = e;
+        hostWeights[i] = weights[i];
+    }
+    bool valid = e >= 0 && e < experts;
+    int slot = valid ? slotMap[e] : -1;
+    bool hit = slot >= 0;
+    bool host = valid && !hit && i % used < tail;
+    unsigned hitMask = __ballot_sync(0xffffffff, hit);
+    unsigned hostMask = __ballot_sync(0xffffffff, host);
+    if(lane == 0){
+        hitWarp[warp] = __popc(hitMask);
+        cpuWarp[warp] = __popc(hostMask);
+    }
+    __syncthreads();
+    int hitAt = 0, cpuAt = 0, hitAll = 0, cpuAll = 0;
+    for(int w = 0; w < (int)(blockDim.x >> 5); w++){
+        if(w < warp){
+            hitAt += hitWarp[w];
+            cpuAt += cpuWarp[w];
+        }
+        hitAll += hitWarp[w];
+        cpuAll += cpuWarp[w];
+    }
+    unsigned below = (1u << lane) - 1u;
+    if(hit){
+        int at = hitAt + __popc(hitMask & below);
+        hits[1 + at] = slot;
+        hits[1 + most + at] = i;
+    }
+    if(host) cpu[1 + cpuAt + __popc(hostMask & below)] = i;
+    if(i == 0){
+        hits[0] = hitAll;
+        cpu[0] = cpuAll;
+        *spill = cpuAll;
+    }
+    __threadfence_system();
+}
+
+// los kernels del relevo se lanzan con el maximo de filas y cada bloque mira en la gpu cuantas hay de verdad
+extern "C" __global__ void hyRelayGather(const float* in, const int* hits, int most, float* out, int latent, int used, i8* packed, float* scales, int* sums) {
+    int group = blockIdx.x * blockDim.y + threadIdx.y;
+    int perRow = latent / 32;
+    if(group >= hits[0] * perRow) return;
+    int j = group / perRow, c = (group % perRow) * 32 + threadIdx.x;
+    float v = in[(u64)(hits[1 + most + j] / used) * latent + c];
+    u64 i = (u64)j * latent + c;
+    out[i] = v;
+    hyQuant(v, i, packed, scales, sums);
+}
+
+template<int TYPE>
+__device__ __forceinline__ void hyRelayExpert(const u8* weights, u64 rowBytes, u64 expertBytes, const int* hits, const i8* packed, const float* scales, const int* sums, float* output, int rows, int cols, const GridTables& t) {
+    int j = blockIdx.y;
+    if(j >= hits[0]) return;
+    u64 at = (u64)j * (cols / 32);
+    typedRows<TYPE, 1, true>(weights + expertBytes * hits[1 + j], rowBytes, packed + at * 32, scales + at, sums + at, nullptr, nullptr, nullptr, output + (u64)rows * j, rows, cols, 0, t);
+}
+
+#define HY_RELAY_EXPERTS(T) extern "C" __global__ void hyRelayExperts##T(const u8* weights, u64 rowBytes, u64 expertBytes, const int* hits, const i8* packed, const float* scales, const int* sums, float* output, int rows, int cols, GridTables t) { hyRelayExpert<T>(weights, rowBytes, expertBytes, hits, packed, scales, sums, output, rows, cols, t); }
+HY_RELAY_EXPERTS(12)
+HY_RELAY_EXPERTS(13)
+HY_RELAY_EXPERTS(14)
+HY_RELAY_EXPERTS(20)
+HY_RELAY_EXPERTS(21)
+HY_RELAY_EXPERTS(23)
+HY_RELAY_EXPERTS(42)
+HY_RELAY_EXPERTS(7)
+HY_RELAY_EXPERTS(8)
+
+extern "C" __global__ void hyRelayScatter(const float* rows, const int* hits, int most, const float* weights, float* out, int latent, int used) {
+    int j = blockIdx.x;
+    if(j >= hits[0]) return;
+    int pair = hits[1 + most + j];
+    float w = weights[pair];
+    float* dst = out + (u64)(pair / used) * latent;
+    for(int c = threadIdx.x; c < latent; c += blockDim.x) atomicAdd(dst + c, w * rows[(u64)j * latent + c]);
+}
+
+// lo de la cpu se suma solo si esa capa tuvo algo para ella: si no la memoria compartida tiene lo de otra capa
+extern "C" __global__ void hyRelayAdd(float* a, const float* b, const int* spill, int count) {
+    if(*spill == 0) return;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < count) a[i] += b[i];
 }
 )";

@@ -221,13 +221,13 @@ inline std::vector<int> GpuModel::hyPropose(int token, int most) {
         bool sparse = g.list && T.idxSnapRows > 0 && row >= 0 && row < T.idxSnapRows;
         int reach = sparse ? g.listWidth : anchor + rows;
         int most = (int)std::max<uint64_t>(1, b.scratchFloats / ((uint64_t)rows * heads * 514));
-        int span = std::max(64, (reach + most - 1) / most);
+        int span = std::max(hySpanLeast(), (reach + most - 1) / most);
         int splits = std::max(1, (reach + span - 1) / span);
         if(sparse){
             go("hyDraftList", spread, 1, 256, 1, T.idxSnap, T.idxSnapCount, row, anchor, g.list, g.counts, g.listWidth);
-            go("hyAttendList", (unsigned int)(heads / 8), spread * (unsigned int)splits, 256, 1, b.qfull, T.cache, g.list, g.counts, g.listWidth, b.attnScratch, heads, 1.0f / sqrtf((float)headKey), span, splits);
+            go(hyAttendName(true), (unsigned int)(heads / 8), spread * (unsigned int)splits, 256, 1, b.qfull, T.cache, g.list, g.counts, g.listWidth, b.attnScratch, heads, 1.0f / sqrtf((float)headKey), span, splits);
             g.sparseSteps++;
-        } else go("hyAttendPart", (unsigned int)(heads / 8), spread * (unsigned int)splits, 256, 1, b.qfull, T.cache, 0, b.positions, b.attnScratch, heads, 0, 1.0f / sqrtf((float)headKey), span, splits);
+        } else go(hyAttendName(false), (unsigned int)(heads / 8), spread * (unsigned int)splits, 256, 1, b.qfull, T.cache, 0, b.positions, b.attnScratch, heads, 0, 1.0f / sqrtf((float)headKey), span, splits);
         go("hyAttendMerge", (unsigned int)heads, spread, 256, 1, b.attnScratch, L.sinks, b.latentOut, heads, splits);
         if(batched){
             go("hyToHalf", blocks((uint64_t)rows * heads * s.kvLora), 1, 256, 1, b.latentOut, b.lat16, rows * heads * s.kvLora);

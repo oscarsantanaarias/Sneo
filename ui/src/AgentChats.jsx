@@ -4,6 +4,7 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { tr } from './i18n.js';
 import { colorOf, readEvents, short, useLoaded } from './agentsShared.js';
+import AgentOffice from './AgentOffice.jsx';
 
 const storeKey = 'sneo.agentChats';
 const mostAgents = 100;
@@ -28,7 +29,84 @@ const html = (text) => ({__html: DOMPurify.sanitize(marked.parse(String(text || 
 
 const number = (i) => String(i + 1).padStart(2, '0');
 
-function AgentCard({agent, index, routes, ready, labelOf, messages, step, draft, others, editing, onDraft, onSend, onStop, onForward, onEdit, onChange, onRemove}){
+// los encargos que un agente le deja a otro con una linea @Nombre: mensaje
+const mostHops = 8;
+const parseHandoffs = (text, agents, selfId) => {
+  const found = [];
+  let open = null;
+
+  for(const line of String(text || '').split('\n')){
+    const match = line.match(/^\s*(?:[-*]\s*)?(?:\*\*)?@([^:\n*]{1,40}?)(?:\*\*)?\s*:\s*(?:\*\*)?\s*(.*)$/);
+    const target = match && agents.find(item => item.id !== selfId && item.name.toLowerCase() === match[1].trim().toLowerCase());
+
+    if(target){
+      open = {id: target.id, name: target.name, text: match[2]};
+      found.push(open);
+      continue;
+    }
+
+    if(match){
+      open = null;
+      continue;
+    }
+
+    if(open && line.trim()){
+      open.text += '\n' + line;
+    } else {
+      open = null;
+    }
+  }
+
+  return found.filter(item => item.text.trim());
+};
+
+const count = (n) => n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n || 0);
+
+function Speed({usage}){
+  if(!usage || (!usage.outputSpeed && !usage.outputTokens)){
+    return null;
+  }
+
+  const parts = [
+    usage.outputSpeed ? `${usage.outputSpeed} tok/s` : '',
+    usage.promptSpeed ? `${tr('prompt')} ${usage.promptSpeed} tok/s` : '',
+    usage.outputTokens ? `${count(usage.outputTokens)} ${tr('out')}` : ''
+  ].filter(Boolean);
+
+  return <span className="chat-speed" title={tr('{0} in, {1} out, {2} rounds', count(usage.inputTokens), count(usage.outputTokens), usage.rounds || 0)}><i className="fa-solid fa-gauge-high"></i> {parts.join(' · ')}</span>;
+}
+
+const stripFrom = (text) => String(text || '').replace(/^(From|Report from) [^:\n]+:\n/, '');
+
+function Trace({items, thinking, live}){
+  const list = items || [];
+
+  if(!list.length && !thinking){
+    return null;
+  }
+
+  const rows = (
+    <>
+      {list.map((row, i) => row.kind === 'thought'
+        ? <div key={i} className="chat-trace-thought">{live && i === list.length - 1 ? row.text.slice(-600) : short(row.text, 400)}</div>
+        : <div key={i} className={`chat-trace-row chat-trace-${row.kind}`}><i className={row.kind === 'handoff' ? 'fa-solid fa-share' : 'fa-solid fa-wrench'}></i> {row.text}</div>)}
+      {thinking && <div className="chat-trace-thought">{thinking}</div>}
+    </>
+  );
+
+  if(live){
+    return <div className="chat-trace chat-trace-live">{rows}</div>;
+  }
+
+  return (
+    <details className="chat-trace">
+      <summary>{tr('What it did ({0})', list.length + (thinking ? 1 : 0))}</summary>
+      {rows}
+    </details>
+  );
+}
+
+function AgentCard({agent, index, routes, ready, labelOf, messages, step, live, speed, asks = [], onAnswer, draft, others, editing, onDraft, onSend, onStop, onForward, onEdit, onChange, onRemove, onClear}){
   const listRef = useRef(null);
   const route = routes.find(item => item.id === agent.route);
   const color = colorOf(route || {});
@@ -39,14 +117,14 @@ function AgentCard({agent, index, routes, ready, labelOf, messages, step, draft,
 
   useEffect(() => {
     listRef.current?.scrollTo({top: listRef.current.scrollHeight, behavior: 'smooth'});
-  }, [messages.length, step]);
+  }, [messages.length, step, live?.length]);
 
   return (
     <section className={step ? 'card chat-card chat-busy' : 'card chat-card'} style={{'--agent': color}}>
       <div className="chat-head">
         <div className="chat-title">
           <strong>{number(index)} · {agent.name}</strong>
-          <span className={`chat-state chat-state-${state}`}><span className="chat-dot"></span>{stateText}</span>
+          <span className={`chat-state chat-state-${state}`}>{state === 'busy' && speed?.outputSpeed ? <span className="chat-live-speed">{speed.outputSpeed} tok/s</span> : null}<span className="chat-dot"></span>{stateText}</span>
         </div>
         <div className="chat-sub">
           <span className="chat-focus">{agent.focus || tr('Agent')}</span>
@@ -54,6 +132,7 @@ function AgentCard({agent, index, routes, ready, labelOf, messages, step, draft,
             {!route && <option value="">{tr('Pick a model...')}</option>}
             {routes.map(item => <option key={item.id} value={item.id}>{labelOf(item)}</option>)}
           </select>
+          <button type="button" className="icon-btn" title={tr('Clear this conversation: the agent forgets everything said here')} disabled={!messages.length && !step} onClick={onClear}><i className="fa-solid fa-broom"></i></button>
           <button type="button" className={editing ? 'icon-btn active' : 'icon-btn'} title={tr('Edit this agent')} onClick={onEdit}><i className="fa-solid fa-sliders"></i></button>
           <button type="button" className="icon-btn icon-danger" title={tr('Remove this agent')} onClick={onRemove}><i className="fa-solid fa-trash"></i></button>
         </div>
@@ -68,8 +147,12 @@ function AgentCard({agent, index, routes, ready, labelOf, messages, step, draft,
           </div>
           <div className="chat-edit-row">
             <label className="chat-check">
-              <input type="checkbox" checked={agent.tools} onChange={(e) => onChange({tools: e.target.checked})} />
+              <input type="checkbox" checked={agent.tools} onChange={(e) => onChange(e.target.checked ? {tools: true} : {tools: false, edits: false})} />
               {tr('Can read the project (files, search, ghidra and ida)')}
+            </label>
+            <label className="chat-check">
+              <input type="checkbox" checked={agent.edits === true || (agent.edits === undefined && agent.id === 'coder')} onChange={(e) => onChange(e.target.checked ? {tools: true, edits: true} : {edits: false})} />
+              {tr('Can change the code (edits files and runs commands)')}
             </label>
             <button type="button" className="agents-small agents-danger" onClick={onRemove}><i className="fa-solid fa-trash"></i> {tr('Remove agent')}</button>
             <button type="button" className="agents-small" onClick={onEdit}>{tr('Done')}</button>
@@ -95,8 +178,8 @@ function AgentCard({agent, index, routes, ready, labelOf, messages, step, draft,
             const from = item.from ? others.find(other => other.id === item.from) : null;
             return (
               <div key={i} className={from ? 'chat-bubble chat-forward' : 'chat-bubble chat-user'} style={from ? {'--from': colorOf(routes.find(one => one.id === from.route) || {})} : undefined}>
-                {from && <span className="chat-from">{tr('From {0}', from.name)}</span>}
-                {from ? String(item.content || '').replace(/^From [^:\n]+:\n/, '') : item.content}
+                {from && <span className="chat-from">{item.kind === 'report' ? tr('Report from {0}', from.name) : tr('From {0}', from.name)}</span>}
+                {from ? stripFrom(item.content) : item.content}
               </div>
             );
           }
@@ -107,9 +190,16 @@ function AgentCard({agent, index, routes, ready, labelOf, messages, step, draft,
 
           return (
             <div key={i} className="chat-bubble chat-agent">
+              <Trace items={item.activity} thinking={item.thinking} />
               <div className="markdown-body" dangerouslySetInnerHTML={html(item.content)} />
+              {item.handoffs?.length ? (
+                <div className="chat-handoffs">
+                  {item.handoffs.map((name, k) => <span key={k} className="chat-handoff"><i className="fa-solid fa-share"></i> {tr('Sent to {0}', name)}</span>)}
+                </div>
+              ) : null}
               <div className="chat-meta">
                 {item.ms ? <span>{(item.ms / 1000).toFixed(1)} s</span> : null}
+                <Speed usage={item.usage} />
                 {item.tools?.length ? <span title={item.tools.join(', ')}><i className="fa-solid fa-wrench"></i> {item.tools.length}</span> : null}
                 <span className="rail-spacer"></span>
                 {others.length > 0 && (
@@ -124,6 +214,17 @@ function AgentCard({agent, index, routes, ready, labelOf, messages, step, draft,
           );
         })}
 
+        {asks.map(ask => (
+          <div key={ask.id} className="chat-bubble chat-ask">
+            <span className="chat-ask-title"><i className="fa-solid fa-hand"></i> {tr('Waiting for your approval')}: {ask.title}</span>
+            {ask.diff && <details><summary>{tr('See the change')}</summary><pre className="chat-ask-diff">{ask.diff}</pre></details>}
+            <div className="chat-ask-row">
+              <button type="button" className="agents-small" onClick={() => onAnswer(ask.id, 'approve')}><i className="fa-solid fa-check"></i> {tr('Approve')}</button>
+              <button type="button" className="agents-small agents-danger" onClick={() => onAnswer(ask.id, 'deny')}><i className="fa-solid fa-xmark"></i> {tr('Deny')}</button>
+            </div>
+          </div>
+        ))}
+        {step && live?.length ? <Trace items={live} live /> : null}
         {step && <div className="chat-bubble chat-typing"><span></span><span></span><span></span></div>}
       </div>
       </div>
@@ -148,11 +249,70 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
   const [agents, setAgents] = useState([]);
   const [chats, setChats] = useState(loadChats);
   const [steps, setSteps] = useState({});
+  const [live, setLive] = useState({});
+  const [speeds, setSpeeds] = useState({});
+  const [visits, setVisits] = useState([]);
+  const [view, setView] = useState(() => {
+    try {
+      return localStorage.getItem('sneo.agentView') === 'office' ? 'office' : 'panels';
+    } catch(e) {
+      return 'panels';
+    }
+  });
+
+  const pickView = (next) => {
+    setView(next);
+    try {
+      localStorage.setItem('sneo.agentView', next);
+    } catch(e) {}
+  };
+  const liveRef = useRef({});
+  const waiting = useRef({});
   const [drafts, setDrafts] = useState({});
   const [editing, setEditing] = useState('');
   const [target, setTarget] = useState('all');
   const [command, setCommand] = useState('');
   const [chatProject, setChatProject] = useState(project);
+  // cuantas vueltas de herramientas tiene cada agente antes de tener que contestar
+  const [asks, setAsks] = useState({});
+  const [agentMode, setAgentMode] = useState(() => {
+    try {
+      return ['auto', 'manual', 'plan'].includes(localStorage.getItem('sneo.agentMode')) ? localStorage.getItem('sneo.agentMode') : 'manual';
+    } catch(e) {
+      return 'manual';
+    }
+  });
+
+  const pickMode = (next) => {
+    setAgentMode(next);
+    try {
+      localStorage.setItem('sneo.agentMode', next);
+    } catch(e) {}
+  };
+
+  const answerAsk = async (agentId, askId, answer) => {
+    setAsks(prev => ({...prev, [agentId]: (prev[agentId] || []).filter(item => item.id !== askId)}));
+    try {
+      await fetch(`${apiUrl}/api/pending/${askId}/${answer}`, {method: 'POST'});
+    } catch(e) {}
+  };
+
+  const [rounds, setRounds] = useState(() => {
+    try {
+      return Math.min(1000, Math.max(1, Number(localStorage.getItem('sneo.agentRounds')) || 100));
+    } catch(e) {
+      return 100;
+    }
+  });
+  const projectPath = projects.find(item => item.name === chatProject)?.path || '';
+
+  const pickRounds = (value) => {
+    const next = Math.min(1000, Math.max(1, Math.round(Number(value)) || 1));
+    setRounds(next);
+    try {
+      localStorage.setItem('sneo.agentRounds', String(next));
+    } catch(e) {}
+  };
   const [notice, setNotice] = useState('');
   const loaded = useRef(false);
   const stops = useRef({});
@@ -220,9 +380,18 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
     setSteps(stepsRef.current);
   };
 
+  const addLive = (id, row) => {
+    const now = liveRef.current[id] || [];
+    const last = now[now.length - 1];
+    // el pensamiento que sigue creciendo reemplaza al anterior en vez de repetirse
+    const next = row.kind === 'thought' && last?.kind === 'thought' ? [...now.slice(0, -1), row] : [...now, row];
+    liveRef.current = {...liveRef.current, [id]: next.slice(-40)};
+    setLive(liveRef.current);
+  };
+
   const nameOf = id => agentsRef.current.find(item => item.id === id)?.name || id;
 
-  const sendTo = async (id, text, from = '') => {
+  const sendTo = async (id, text, from = '', hops = 0, kind = '') => {
     const agent = agentsRef.current.find(item => item.id === id);
     const clean = String(text || '').trim();
 
@@ -231,6 +400,11 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
     }
 
     if(stepsRef.current[id]){
+      // lo que manda otro agente espera su turno y lo que escribe el usuario avisa
+      if(kind){
+        waiting.current[id] = [...(waiting.current[id] || []), [id, text, from, hops, kind]];
+        return;
+      }
       push(id, {role: 'error', content: tr('{0} is still answering, wait or stop it first.', agent.name)});
       return;
     }
@@ -250,34 +424,77 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
       return;
     }
 
-    const message = {role: 'user', content: from ? `From ${nameOf(from)}:\n${clean}` : clean, ...(from ? {from} : {})};
+    const message = {role: 'user', content: from ? `${kind === 'report' ? 'Report from' : 'From'} ${nameOf(from)}:\n${clean}` : clean, ...(from ? {from, kind} : {})};
     const history = [...(chatsRef.current[id] || []), message]
       .filter(item => item.role === 'user' || item.role === 'assistant')
       .map(item => ({role: item.role, content: item.content}));
     chatsRef.current = {...chatsRef.current, [id]: [...(chatsRef.current[id] || []), message]};
     push(id, message);
+    if(from){
+      setVisits(prev => [...prev, {id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, from, to: id, text: clean, kind}].slice(-30));
+    }
 
     const stop = new AbortController();
     stops.current[id] = stop;
     setStep(id, tr('Thinking...'));
+    liveRef.current = {...liveRef.current, [id]: []};
+    setLive(liveRef.current);
 
     try {
       const req = await fetch(`${apiUrl}/api/team/chat`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({agent, history, project: chatProject, peers: agentsRef.current.filter(item => item.id !== id).map(item => item.name)}),
+        body: JSON.stringify({agent, history, project: chatProject, rounds, mode: agentMode, peers: agentsRef.current.filter(item => item.id !== id).map(item => item.name)}),
         signal: stop.signal
       });
       let answered = false;
 
       await readEvents(req, event => {
-        if(event.type === 'step'){
+        if(event.type === 'step' && event.usage){
+          setSpeeds(prev => ({...prev, [id]: event.usage}));
+        }
+
+        if(event.type === 'step' && event.thought){
+          setStep(id, tr('Thinking...'));
+          addLive(id, {kind: 'thought', text: event.thought});
+        }
+
+        if(event.type === 'step' && event.tool){
           setStep(id, tr('Using {0}', event.tool));
+          addLive(id, {kind: 'tool', text: event.detail ? `${event.tool} · ${event.detail}` : event.tool});
         }
 
         if(event.type === 'reply'){
           answered = true;
-          push(id, {role: 'assistant', content: event.content || tr('(no answer)'), ms: event.ms, tools: event.tools || []});
+          const content = event.content || tr('(no answer)');
+          const handoffs = hops < mostHops ? parseHandoffs(content, agentsRef.current, id) : [];
+          const sentBack = handoffs.some(item => item.id === from);
+          push(id, {role: 'assistant', content, ms: event.ms, tools: event.tools || [], usage: event.usage || null, thinking: event.thinking || '', activity: liveRef.current[id] || [], handoffs: handoffs.map(item => item.name)});
+
+          // los encargos salen de verdad y la respuesta a un encargo vuelve sola al que lo pidio
+          handoffs.forEach(item => setTimeout(() => sendTo(item.id, item.text.trim(), id, hops + 1, 'task'), 0));
+          if(kind === 'task' && from && !sentBack && hops < mostHops){
+            setTimeout(() => sendTo(from, content, id, hops + 1, 'report'), 0);
+          }
+          if(hops >= mostHops && parseHandoffs(content, agentsRef.current, id).length){
+            push(id, {role: 'error', content: tr('The agents passed work {0} times in a row, stopped here so they do not loop.', mostHops)});
+          }
+        }
+
+        if(event.type === 'approval' && event.item){
+          const item = {id: event.item.id, title: event.item.title, diff: ''};
+          setAsks(prev => ({...prev, [id]: [...(prev[id] || []), item]}));
+          setStep(id, tr('Waiting for your approval'));
+          fetch(`${apiUrl}/api/pending`).then(answer => answer.json()).then(res => {
+            const found = (res.items || []).find(one => one.id === item.id);
+            const diff = (found?.files || []).map(file => `${file.file}\n${file.diff || ''}`).join('\n\n') || found?.command || found?.details || '';
+            if(diff) setAsks(prev => ({...prev, [id]: (prev[id] || []).map(one => one.id === item.id ? {...one, diff: diff.slice(0, 12000)} : one)}));
+          }).catch(() => {});
+        }
+
+        if(event.type === 'approval-done'){
+          setAsks(prev => ({...prev, [id]: (prev[id] || []).filter(one => one.id !== event.id)}));
+          setStep(id, tr('Thinking...'));
         }
 
         if(event.type === 'error'){
@@ -294,6 +511,10 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
     } finally {
       delete stops.current[id];
       setStep(id, '');
+      liveRef.current = {...liveRef.current, [id]: []};
+      setLive(liveRef.current);
+      const next = (waiting.current[id] || []).shift();
+      if(next) setTimeout(() => sendTo(...next), 0);
     }
   };
 
@@ -357,8 +578,21 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
     }
   };
 
+  // la memoria de cada agente es su conversacion, borrarla es empezar de cero
+  const clearAgent = (id) => {
+    stops.current[id]?.abort();
+    delete waiting.current[id];
+    Object.keys(waiting.current).forEach(key => {
+      waiting.current[key] = waiting.current[key].filter(item => item[2] !== id);
+    });
+    chatsRef.current = {...chatsRef.current, [id]: []};
+    setChats(prev => ({...prev, [id]: []}));
+  };
+
   const clearLogs = () => {
+    waiting.current = {};
     Object.values(stops.current).forEach(stop => stop.abort());
+    chatsRef.current = {};
     setChats({});
   };
 
@@ -380,15 +614,50 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
               <option value="">{tr('No project')}</option>
               {projects.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
             </select>
+            {projectPath && <span className="chats-path" title={projectPath}>{projectPath}</span>}
           </label>
+          <label className="chats-rounds" title={tr('What agents that change code may do: Auto changes files and runs commands alone, Ask waits for your approval on each change, Plan only reads')}>
+            <i className="fa-solid fa-shield-halved"></i>
+            {tr('Permissions')}
+            <select value={agentMode} onChange={(e) => pickMode(e.target.value)}>
+              <option value="auto">{tr('Auto')}</option>
+              <option value="manual">{tr('Ask')}</option>
+              <option value="plan">{tr('Plan')}</option>
+            </select>
+          </label>
+          <label className="chats-rounds" title={tr('How many tool calls each agent can make before it has to answer')}>
+            <i className="fa-solid fa-wrench"></i>
+            {tr('Tool calls')}
+            <input type="number" min="1" max="1000" value={rounds} onChange={(e) => pickRounds(e.target.value)} />
+          </label>
+          <div className="segmented chats-view">
+            <button type="button" className={view === 'panels' ? 'active' : ''} onClick={() => pickView('panels')}><i className="fa-solid fa-table-columns"></i> {tr('Panels')}</button>
+            <button type="button" className={view === 'office' ? 'active' : ''} onClick={() => pickView('office')}><i className="fa-solid fa-building"></i> {tr('Office')}</button>
+          </div>
           <button type="button" className="agents-small" disabled={agents.length >= mostAgents} onClick={addAgent}><i className="fa-solid fa-plus"></i> {tr('Add agent')}</button>
-          <button type="button" className="agents-small" onClick={clearLogs}>{tr('Clear logs')}</button>
+          <button type="button" className="agents-small" title={tr('Stops every agent and clears all conversations: they forget everything and start from zero')} onClick={clearLogs}>{tr('Clear logs')}</button>
         </div>
       </div>
 
       {notice && <div className="view-alert alert-bad">{notice}</div>}
 
-      <div className="chats-grid" style={{'--chat-cols': columns, '--chat-rows': Math.max(1, Math.ceil(agents.length / columns))}}>
+      {view === 'office' && (
+        <AgentOffice
+          agents={agents}
+          routes={routes}
+          steps={steps}
+          live={live}
+          speeds={speeds}
+          chats={chats}
+          visits={visits}
+          readyOf={route => readyOf(route)}
+          labelOf={labelOf}
+          onSend={(id, text) => sendTo(id, text)}
+          onStop={id => stops.current[id]?.abort()}
+        />
+      )}
+
+      {view === 'panels' && <div className="chats-grid" style={{'--chat-cols': columns, '--chat-rows': Math.max(1, Math.ceil(agents.length / columns))}}>
         {agents.map((agent, i) => (
           <AgentCard
             key={agent.id}
@@ -399,6 +668,10 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
             labelOf={labelOf}
             messages={chats[agent.id] || []}
             step={steps[agent.id] || ''}
+            live={live[agent.id] || []}
+            speed={speeds[agent.id] || null}
+            asks={asks[agent.id] || []}
+            onAnswer={(askId, answer) => answerAsk(agent.id, askId, answer)}
             draft={drafts[agent.id] || ''}
             others={agents.filter(item => item.id !== agent.id)}
             editing={editing === agent.id}
@@ -409,9 +682,10 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
             onEdit={() => setEditing(prev => prev === agent.id ? '' : agent.id)}
             onChange={change => changeAgent(agent.id, change)}
             onRemove={() => removeAgent(agent.id)}
+            onClear={() => clearAgent(agent.id)}
           />
         ))}
-      </div>
+      </div>}
 
       <section className="card chats-command" title={tr('Send an instruction to the entire team or to one agent')}>
         <div className="agents-row">

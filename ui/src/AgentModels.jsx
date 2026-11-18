@@ -9,10 +9,32 @@ const contexts = [8192, 16384, 32768, 65536, 131072];
 
 const gigabytes = value => `${Number(value || 0).toFixed(1)} GB`;
 
-export default function AgentModels({apiUrl, routes, presets, claudeModels, dirty, notice, onAdd, onEdit, onRemove, onSave, onReload}){
+export default function AgentModels({apiUrl, routes, presets, claudeModels, claudeCodeModels = [], dirty, notice, onAdd, onEdit, onRemove, onSave, onReload}){
   const [tests, setTests] = useState({});
   const [modelLists, setModelLists] = useState({});
   const [listNotice, setListNotice] = useState('');
+  const [engine, setEngine] = useState({models: [], currentModel: '', ready: false, warming: false});
+
+  // los modelos de esta pc y cual esta cargado, igual que en el resto de la app
+  useEffect(() => {
+    let alive = true;
+    const look = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/api/engine/files`).then(answer => answer.json());
+        if(alive) setEngine({models: res.models || [], currentModel: res.currentModel || '', ready: !!res.ready, warming: !!res.warming});
+      } catch(e) {}
+    };
+    look();
+    const timer = setInterval(look, 3000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [apiUrl]);
+
+  const thisPc = (item) => item.kind === 'local' && /^https?:\/\/(127\.0\.0\.1|localhost):8000(\/|$)/i.test(item.baseUrl || '');
+  const loadedName = engine.currentModel.split(/[\\/]/).pop();
+  const loadedLabel = engine.ready ? loadedName : engine.warming ? `${loadedName} (${tr('loading')})` : '';
 
   const testRoute = async (id) => {
     if(!await onSave()){
@@ -60,16 +82,25 @@ export default function AgentModels({apiUrl, routes, presets, claudeModels, dirt
               <div key={item.id} className="agents-route" style={{'--route': colorOf(item)}}>
                 <div className="agents-row">
                   <input className="agents-name" value={item.name} onChange={(e) => onEdit(item.id, {name: e.target.value})} aria-label={tr('Name')} />
-                  <span className="agents-kind">{item.kind === 'local' ? tr('this PC') : item.kind === 'claude' ? 'Claude' : 'API'}</span>
+                  <span className="agents-kind">{item.kind === 'local' ? tr('this PC') : item.kind === 'claude' ? 'Claude' : item.kind === 'claudecode' ? tr('your plan') : 'API'}</span>
                   <button type="button" className="icon-btn icon-danger" title={tr('Remove')} onClick={() => onRemove(item.id)}><i className="fa-solid fa-xmark"></i></button>
                 </div>
 
-                {item.kind !== 'claude' && (
+                {item.kind !== 'claude' && item.kind !== 'claudecode' && (
                   <input value={item.baseUrl} placeholder="https://.../v1" onChange={(e) => onEdit(item.id, {baseUrl: e.target.value})} aria-label={tr('Address')} />
                 )}
 
                 <div className="agents-row">
-                  {item.kind === 'claude' ? (
+                  {thisPc(item) ? (
+                    <select value={item.model} onChange={(e) => onEdit(item.id, {model: e.target.value})} aria-label={tr('Model')}>
+                      <option value="">{loadedLabel ? tr('The loaded one: {0}', loadedLabel) : tr('The loaded one (none now)')}</option>
+                      {engine.models.map(model => <option key={model.path} value={model.name}>{model.name}{model.path === engine.currentModel && engine.ready ? ` · ${tr('loaded')}` : ''}</option>)}
+                    </select>
+                  ) : item.kind === 'claudecode' ? (
+                    <select value={item.model} onChange={(e) => onEdit(item.id, {model: e.target.value})} aria-label={tr('Model')}>
+                      {claudeCodeModels.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+                    </select>
+                  ) : item.kind === 'claude' ? (
                     <select value={item.model} onChange={(e) => onEdit(item.id, {model: e.target.value})} aria-label={tr('Model')}>
                       {claudeModels.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
                     </select>
@@ -84,7 +115,20 @@ export default function AgentModels({apiUrl, routes, presets, claudeModels, dirt
                   )}
                 </div>
 
-                {item.kind !== 'local' && (
+                {item.kind === 'claudecode' && (
+                  <div className="agents-row">
+                    <span className="field-label">{tr('Effort')}</span>
+                    <select className="agents-effort" value={item.effort} title={tr('Effort')} onChange={(e) => onEdit(item.id, {effort: e.target.value})}>
+                      {efforts.map(level => <option key={level} value={level}>{level}</option>)}
+                    </select>
+                  </div>
+                )}
+
+                {item.kind === 'claudecode' && (
+                  <em className="field-help">{tr('Uses Claude Code installed on this PC with your own Claude account, no API key. It counts against your plan limits.')}</em>
+                )}
+
+                {item.kind !== 'local' && item.kind !== 'claudecode' && (
                   <div className="agents-row">
                     <input type="password" value={item.apiKey} placeholder={tr('API key')} autoComplete="off" onChange={(e) => onEdit(item.id, {apiKey: e.target.value})} aria-label={tr('API key')} />
                     {item.kind === 'claude' && (
@@ -105,7 +149,7 @@ export default function AgentModels({apiUrl, routes, presets, claudeModels, dirt
                   </button>
                   {tests[item.id] && !tests[item.id].busy && (
                     <span className={tests[item.id].ok ? 'agents-ok' : 'agents-bad'} title={tests[item.id].message || tests[item.id].answer || ''}>
-                      {tests[item.id].ok ? tr('Answers in {0} s', (tests[item.id].ms / 1000).toFixed(1)) : short(tests[item.id].message, 60)}
+                      {tests[item.id].ok ? (tests[item.id].model ? tr('Answers in {0} s with {1}', (tests[item.id].ms / 1000).toFixed(1), short(tests[item.id].model, 40)) : tr('Answers in {0} s', (tests[item.id].ms / 1000).toFixed(1))) : short(tests[item.id].message, 60)}
                     </span>
                   )}
                 </div>

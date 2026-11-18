@@ -61,6 +61,7 @@ struct Brain {
     bool gpuUsed = false;
     int mainGpu = -1;
     bool useHelper = true;
+    bool helperFirst = false;
     int helperGpu = -1;
     double helperGb = 0;
     uint64_t extraKeep = 0;
@@ -132,6 +133,7 @@ struct Brain {
             next->extraKeep = extraKeep;
             next->hostBudget = ramCap;
             next->useHelper = useHelper;
+            next->helperFirst = helperFirst;
             next->helperOrdinal = helperGpu;
             next->helperCap = (uint64_t)(helperGb * 1073741824.0);
             std::filesystem::path beside = std::filesystem::path(path).parent_path() / "Qwen3.8-Flash-Next.draft-q2.gguf";

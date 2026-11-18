@@ -18,6 +18,7 @@ export default function AgentsView({apiUrl, projects = [], project = ''}){
   const [routes, setRoutes] = useState([]);
   const [presets, setPresets] = useState([]);
   const [claudeModels, setClaudeModels] = useState([]);
+  const [claudeCodeModels, setClaudeCodeModels] = useState([]);
   const [dirty, setDirty] = useState(false);
   const [notice, setNotice] = useState('');
   const routesRef = useRef([]);
@@ -31,6 +32,7 @@ export default function AgentsView({apiUrl, projects = [], project = ''}){
       setRoutes(res.routes || []);
       setPresets(res.presets || []);
       setClaudeModels(res.claudeModels || []);
+      setClaudeCodeModels(res.claudeCodeModels || []);
       setDirty(false);
       setNotice('');
     } catch(e) {
@@ -132,6 +134,7 @@ export default function AgentsView({apiUrl, projects = [], project = ''}){
           routes={routes}
           presets={presets}
           claudeModels={claudeModels}
+          claudeCodeModels={claudeCodeModels}
           dirty={dirty}
           notice={notice}
           onAdd={addRoute}

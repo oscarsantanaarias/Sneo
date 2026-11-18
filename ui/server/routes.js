@@ -15,8 +15,9 @@ import { terminalList, terminalRead, terminalStart, terminalStop } from './termi
 import { getAgentAnswer, runSubAgent, toolParallelAgents } from './agents.js';
 import { askRoute, chatAgent, maskRoutes, readAgents, readRoutes, routeLabel, routePresets, runTeam, saveAgents, saveRoutes } from './teams.js';
 import { claudeModels } from './claude.js';
+import { claudeCodeModels, dropChatSession } from './claudecode.js';
 import { answerApproval, approveRun, queueFor, runStore, stopChildren } from './runs.js';
-import { pickFolder } from './picker.js';
+import { pickFiles, pickFolder } from './picker.js';
 import { accessModes, normalizeMode } from './gate.js';
 import { toolCreateFolder, toolDeletePath, toolGrepFiles, toolListFiles, toolListProjects, toolProposePatch, toolReadFile, toolRenamePath, toolSandboxRun, toolWriteFile } from './tools.js';
 
@@ -213,6 +214,32 @@ const updateEnvVar = async (key, value) => {
   }
 };
 
+router.post('/style/pick', async (req, res) => {
+  try {
+    const picked = await pickFiles({title: 'Pick files with your code'});
+    const current = await readSettings();
+    const styleFiles = [...new Set([...(current.styleFiles || []), ...picked])].slice(0, 12);
+    await saveSettings({...current, styleFiles});
+    return res.status(200).json({styleFiles});
+  } catch(e) {
+    return res.status(500).json({message: e.message});
+  }
+});
+
+router.post('/planner', async (req, res) => {
+  const current = await readSettings();
+  const plannerRoute = cleanText(req.body?.route);
+  await saveSettings({...current, plannerRoute});
+  return res.status(200).json({plannerRoute});
+});
+
+router.post('/style/remove', async (req, res) => {
+  const current = await readSettings();
+  const styleFiles = (current.styleFiles || []).filter(item => item !== req.body?.path);
+  await saveSettings({...current, styleFiles});
+  return res.status(200).json({styleFiles});
+});
+
 router.put('/settings', async (req, res) => {
   const {model, accessMode, allowNetwork, language, contextMessages, maxToolLoops, reverseTool, ghidraPort, idaPort, providerBaseUrl, providerApiKey, numCtx, temperature, thinkDepth, thinkCap, imageBaseUrl, imageModel, imageApiKey} = req.body ?? {};
 
@@ -362,6 +389,7 @@ router.delete('/chats/:id', async (req, res) => {
     await updateChats(data => {
       data.chats = data.chats.filter(item => item.id !== req.params.id);
     });
+    dropChatSession(req.params.id);
 
     return res.status(200).json({message: 'Chat eliminado'});
   } catch(err) {
@@ -956,7 +984,7 @@ router.post('/chat/mode', async (req, res) => {
 });
 
 router.get('/team/routes', async (req, res) => {
-  return res.status(200).json({routes: maskRoutes(await readRoutes()), presets: routePresets, claudeModels});
+  return res.status(200).json({routes: maskRoutes(await readRoutes()), presets: routePresets, claudeModels, claudeCodeModels});
 });
 
 router.put('/team/routes', async (req, res) => {
@@ -978,7 +1006,12 @@ router.post('/team/routes/test', async (req, res) => {
 
   try {
     const reply = await askRoute(route, [{role: 'user', content: 'Answer with the single word OK.'}], null, {signal: AbortSignal.timeout(90000)});
-    return res.status(200).json({ok: true, answer: String(reply.content || '').trim().slice(0, 200), ms: Date.now() - startedAt});
+    let model = '';
+    if(route.kind === 'local'){
+      const state = await fetch(`${route.baseUrl.replace(/\/v1$/, '')}/api/models`, {signal: AbortSignal.timeout(3000)}).then(answer => answer.json()).catch(() => ({}));
+      model = String(state.currentModel || '').split(/[\\/]/).pop();
+    }
+    return res.status(200).json({ok: true, answer: String(reply.content || '').trim().slice(0, 200), ms: Date.now() - startedAt, model});
   } catch(e) {
     return res.status(200).json({ok: false, message: String(e.message || e)});
   }
@@ -993,6 +1026,10 @@ router.post('/team/models', async (req, res) => {
 
   if(route.kind === 'claude'){
     return res.status(200).json({models: claudeModels.map(item => item.id)});
+  }
+
+  if(route.kind === 'claudecode'){
+    return res.status(200).json({models: claudeCodeModels.map(item => item.id).filter(Boolean)});
   }
 
   try {
@@ -1116,19 +1153,35 @@ router.post('/team/chat', async (req, res) => {
       stop.abort();
     }
   });
+  // la misma medida de velocidad que el workspace, sumada en todas las vueltas del agente
+  const usage = {inputTokens: 0, outputTokens: 0, cachedTokens: 0, lastPromptTokens: 0, contextLimit: 0, thinkMs: 0, writeMs: 0, toolMs: 0, firstTokenMs: 0, outputSpeed: 0, promptSpeed: 0, rounds: 0, toolCalls: 0};
+
+  // los agentes corren con su propio modo de permisos y las aprobaciones salen en su panel
+  const agentRun = {
+    id: makeId(),
+    chatId: '',
+    mode: normalizeMode(body.mode, (await readSettings()).accessMode),
+    signal: stop.signal,
+    onEvent: event => {
+      if(event.type === 'approval' || event.type === 'approval-done') send(event);
+    },
+    children: new Set()
+  };
+  stop.signal.addEventListener('abort', () => stopChildren(agentRun), {once: true});
 
   try {
-    const reply = await chatAgent({
+    const reply = await runStore.run(agentRun, () => chatAgent({
       agent: body.agent,
       route,
       history: body.history,
       project: cleanText(body.project),
       peers: (Array.isArray(body.peers) ? body.peers : []).map(cleanText).filter(Boolean).slice(0, 8),
-      run: {signal: stop.signal, usage: null},
-      onStep: step => send({type: 'step', tool: step.tool}),
+      rounds: Math.min(1000, Math.max(1, Math.round(Number(body.rounds)) || 100)),
+      run: {signal: stop.signal, usage},
+      onStep: step => send({type: 'step', tool: step.tool || '', detail: step.detail || '', thought: step.thought || '', usage: {...usage}}),
       runWorker: runSubAgent
-    });
-    send({type: 'reply', content: reply.content, tools: reply.tools, ms: Date.now() - startedAt, route: routeLabel(route)});
+    }));
+    send({type: 'reply', content: reply.content, tools: reply.tools, thinking: reply.thinking || '', usage: {...usage}, ms: Date.now() - startedAt, route: routeLabel(route)});
   } catch(e) {
     send({type: 'error', message: stop.signal.aborted ? 'Stopped.' : String(e.message || e)});
   } finally {

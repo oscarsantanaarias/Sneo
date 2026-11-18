@@ -10,6 +10,7 @@ import { pathExists, startData } from './storage.js';
 import apiRoutes from './routes.js';
 import engineRoutes, { healPair, readAllowNetwork } from './engine.js';
 import { applyPhone, pairedDevice, phoneAdmin } from './phone.js';
+import trainRoutes from './train.js';
 
 dotenv.config();
 
@@ -109,6 +110,7 @@ app.use(express.static(paths.distDir, {index: false}));
 app.get('/api/sneo', (req, res) => res.status(200).json({sneo: true}));
 app.use('/api/phone', phoneAdmin({apiRoutes, engineRoutes}));
 app.use('/api/engine', engineRoutes);
+app.use('/api/train', trainRoutes);
 app.use('/api', apiRoutes);
 app.get(/.*/, sendPage);
 

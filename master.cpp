@@ -103,6 +103,7 @@ struct Engine {
     bool secondGpu = true;
     int helperGpu = -1;
     double helperGb = 0;
+    bool helperFirst = false;
     int frontCap = 0;
     std::vector<GpuCard> gpus;
     std::string folderArg = "modelos";
@@ -623,6 +624,7 @@ void loadBrain(std::string path, uint64_t ticket) {
         brain.useHelper = engine.secondGpu;
         brain.helperGpu = engine.helperGpu;
         brain.helperGb = engine.helperGb;
+        brain.helperFirst = engine.helperFirst;
         brain.extraKeep = engine.oomKeep;
     }
     {
@@ -767,7 +769,7 @@ std::string hashText(const std::string& text) {
 
 void savePool() {
     std::ostringstream out;
-    out << "{\"backend\":" << quoteJson(engine.backend) << ",\"speculate\":" << (engine.speculate ? "true" : "false") << ",\"fastRouting\":" << (engine.fastRouting ? "true" : "false") << ",\"foresee\":" << (engine.foresee ? "true" : "false") << ",\"mainGpu\":" << engine.mainGpu << ",\"secondGpu\":" << (engine.secondGpu ? "true" : "false") << ",\"helperGpu\":" << engine.helperGpu << ",\"helperGb\":" << engine.helperGb << ",\"frontLayers\":" << engine.frontCap << ",\"draftLength\":" << engine.draftLength << ",\"copyReach\":" << engine.copyReach << ",\"cpuPlan\":" << quoteJson(engine.cpuPlan) << ",\"warmShare\":" << engine.warmShare << ",\"holdRam\":" << (engine.holdRam ? "true" : "false") << ",\"ramWhole\":" << (engine.ramWhole ? "true" : "false") << ",\"pinShare\":" << engine.pinShare << ",\"pinGb\":" << engine.pinGb << ",\"vision\":" << (engine.vision ? "true" : "false") << ",\"visionGpu\":" << engine.visionGpu << ",\"draftSure\":" << engine.draftSure << ",\"context\":" << engine.context << ",\"acceptRequests\":" << (engine.acceptRequests ? "true" : "false") << ",\"doorPort\":" << engine.doorPort
+    out << "{\"backend\":" << quoteJson(engine.backend) << ",\"speculate\":" << (engine.speculate ? "true" : "false") << ",\"fastRouting\":" << (engine.fastRouting ? "true" : "false") << ",\"foresee\":" << (engine.foresee ? "true" : "false") << ",\"mainGpu\":" << engine.mainGpu << ",\"secondGpu\":" << (engine.secondGpu ? "true" : "false") << ",\"helperGpu\":" << engine.helperGpu << ",\"helperGb\":" << engine.helperGb << ",\"helperFirst\":" << (engine.helperFirst ? "true" : "false") << ",\"frontLayers\":" << engine.frontCap << ",\"draftLength\":" << engine.draftLength << ",\"copyReach\":" << engine.copyReach << ",\"cpuPlan\":" << quoteJson(engine.cpuPlan) << ",\"warmShare\":" << engine.warmShare << ",\"holdRam\":" << (engine.holdRam ? "true" : "false") << ",\"ramWhole\":" << (engine.ramWhole ? "true" : "false") << ",\"pinShare\":" << engine.pinShare << ",\"pinGb\":" << engine.pinGb << ",\"vision\":" << (engine.vision ? "true" : "false") << ",\"visionGpu\":" << engine.visionGpu << ",\"draftSure\":" << engine.draftSure << ",\"context\":" << engine.context << ",\"acceptRequests\":" << (engine.acceptRequests ? "true" : "false") << ",\"doorPort\":" << engine.doorPort
         << ",\"apiListen\":" << quoteJson(engine.apiListen) << ",\"model\":" << quoteJson(engine.modelPath.empty() ? engine.savedModel : engine.modelPath) << ",\"folder\":" << quoteJson(engine.modelFolder) << ",\"slots\":[";
     for(size_t i = 0; i < engine.slots.size(); i++){
         const PoolSlot& s = engine.slots[i];
@@ -797,6 +799,7 @@ void loadPool() {
     engine.secondGpu = saved["secondGpu"].truthy(true);
     engine.helperGpu = (int)saved["helperGpu"].num(-1);
     engine.helperGb = std::max(0.0, saved["helperGb"].num(0));
+    engine.helperFirst = saved["helperFirst"].truthy(false);
     engine.frontCap = std::max(0, (int)saved["frontLayers"].num(0));
     engine.fastRouting = saved["fastRouting"].truthy(true);
     engine.foresee = saved["foresee"].truthy(false);
@@ -1624,7 +1627,7 @@ std::string poolJson() {
     std::ostringstream out;
     out << "{\"self\":" << quoteJson(engine.selfName) << ",\"selfScreen\":" << engine.selfScreen << ",\"backend\":" << quoteJson(engine.backend) << ",\"running\":" << quoteJson(engine.running) << ",\"generation\":\"" << brainName() << "\",\"context\":" << engine.context
         << ",\"pinned\":" << (brainState == 2 && brain.gpu ? brain.gpu->warmPinnedBytes : 0)
-        << ",\"mainGpu\":" << engine.mainGpu << ",\"secondGpu\":" << (engine.secondGpu ? "true" : "false") << ",\"helperGpu\":" << engine.helperGpu << ",\"helperGb\":" << engine.helperGb << ",\"frontLayers\":" << engine.frontCap << ",\"frontEnd\":" << engine.frontEnd
+        << ",\"mainGpu\":" << engine.mainGpu << ",\"secondGpu\":" << (engine.secondGpu ? "true" : "false") << ",\"helperGpu\":" << engine.helperGpu << ",\"helperGb\":" << engine.helperGb << ",\"helperFirst\":" << (engine.helperFirst ? "true" : "false") << ",\"frontLayers\":" << engine.frontCap << ",\"frontEnd\":" << engine.frontEnd
         << ",\"draftLength\":" << engine.draftLength << ",\"copyReach\":" << engine.copyReach << ",\"cpuPlan\":" << quoteJson(engine.cpuPlan) << ",\"warmShare\":" << engine.warmShare << ",\"holdRam\":" << (engine.holdRam ? "true" : "false") << ",\"ramWhole\":" << (engine.ramWhole ? "true" : "false") << ",\"pinShare\":" << engine.pinShare << ",\"pinGb\":" << engine.pinGb << ",\"vision\":" << (engine.vision ? "true" : "false") << ",\"visionGpu\":" << engine.visionGpu << ",\"visionReady\":" << (brainState == 2 && brain.gpu && brain.gpu->seeing ? "true" : "false") << ",\"visionProblem\":" << quoteJson(brain.gpu ? brain.gpu->visionProblem : std::string()) << ",\"draftSure\":" << engine.draftSure << ",\"speculate\":" << (engine.speculate ? "true" : "false")
         << ",\"fastRouting\":" << (engine.fastRouting ? "true" : "false") << ",\"foresee\":" << (engine.foresee ? "true" : "false") << ",\"gpus\":[";
     for(size_t i = 0; i < engine.gpus.size(); i++){
@@ -2445,6 +2448,7 @@ void handleClient(SOCKET client) {
             int helperPick = body.has("helperGpu") ? (int)body["helperGpu"].num(-1) : engine.helperGpu;
             if(helperPick < -1 || helperPick >= (int)engine.gpus.size()) helperPick = -1;
             double helperRoom = body.has("helperGb") ? std::max(0.0, body["helperGb"].num(0)) : engine.helperGb;
+            bool helperAhead = body.has("helperFirst") ? body["helperFirst"].truthy(false) : engine.helperFirst;
             int frontCap = body.has("frontLayers") ? std::max(0, (int)body["frontLayers"].num(0)) : engine.frontCap;
             int drafts = body.has("draftLength") ? std::max(1, std::min(16, (int)body["draftLength"].num(3))) : engine.draftLength;
             int reach = body.has("copyReach") ? std::max(0, std::min(32, (int)body["copyReach"].num(8))) : engine.copyReach;
@@ -2462,7 +2466,7 @@ void handleClient(SOCKET client) {
             bool whole = body.has("ramWhole") ? body["ramWhole"].truthy(false) : engine.ramWhole;
             int seeingGpu = body.has("visionGpu") ? (int)body["visionGpu"].num(-1) : engine.visionGpu;
             if(seeingGpu < -1 || seeingGpu >= (int)engine.gpus.size()) seeingGpu = -1;
-            gpusMoved = pickedGpu != engine.mainGpu || helping != engine.secondGpu || helperPick != engine.helperGpu || helperRoom != engine.helperGb || frontCap != engine.frontCap || drafts != engine.draftLength || reach != engine.copyReach || plan != engine.cpuPlan || share != engine.warmShare
+            gpusMoved = pickedGpu != engine.mainGpu || helping != engine.secondGpu || helperPick != engine.helperGpu || helperRoom != engine.helperGb || helperAhead != engine.helperFirst || frontCap != engine.frontCap || drafts != engine.draftLength || reach != engine.copyReach || plan != engine.cpuPlan || share != engine.warmShare
                 || sure != engine.draftSure || guessing != engine.speculate || skipping != engine.fastRouting || reading != engine.foresee || seeing != engine.vision || seeingGpu != engine.visionGpu || pinning != engine.pinShare || pinSize != engine.pinGb || whole != engine.ramWhole;
             engine.ramWhole = whole;
             engine.pinShare = pinning;
@@ -2473,6 +2477,7 @@ void handleClient(SOCKET client) {
             engine.secondGpu = helping;
             engine.helperGpu = helperPick;
             engine.helperGb = helperRoom;
+            engine.helperFirst = helperAhead;
             engine.frontCap = frontCap;
             engine.draftLength = drafts;
             engine.copyReach = reach;

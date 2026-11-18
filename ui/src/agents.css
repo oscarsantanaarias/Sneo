@@ -1016,3 +1016,254 @@
     animation: none !important;
   }
 }
+
+.chat-trace {
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.chat-trace summary {
+  cursor: pointer;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.chat-trace-live {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border-left: 3px solid var(--agent);
+  border-radius: var(--radius-sm);
+}
+
+.chat-trace-thought {
+  margin: 4px 0;
+  font-style: italic;
+  white-space: pre-wrap;
+  color: var(--text-faint);
+}
+
+.chat-trace-row {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-trace-row i {
+  color: var(--agent);
+}
+
+.chat-handoffs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chat-handoff {
+  padding: 2px 8px;
+  border: 1px solid var(--agent);
+  border-radius: 999px;
+  color: var(--agent);
+  font-size: 11px;
+}
+
+.chats-path {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.chats-rounds {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.chats-rounds input {
+  width: 70px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+
+.chat-speed {
+  white-space: nowrap;
+}
+
+.chat-speed i {
+  color: var(--agent);
+}
+
+.chat-live-speed {
+  margin-right: 8px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* la oficina ocupa el lugar de los paneles y el lado derecho muestra al agente elegido */
+.office {
+  flex: 1 1 auto;
+  min-height: 360px;
+  display: flex;
+  gap: 12px;
+}
+
+.office-room {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  background: #15131c;
+  border: 1px solid var(--border-soft);
+  border-radius: 12px;
+}
+
+.office-room canvas {
+  display: block;
+  image-rendering: pixelated;
+}
+
+.office-hint {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  color: var(--text-faint);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.office-side {
+  flex: 0 0 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border-left: 3px solid var(--agent);
+  overflow: hidden;
+}
+
+.office-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--agent);
+  font-size: 15px;
+}
+
+.office-side-sub,
+.office-side-state {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+
+.office-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+}
+
+.office-answer {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.office-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.office-thought {
+  max-height: 160px;
+  overflow: auto;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
+.office-tool {
+  overflow: hidden;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.office-tool i {
+  color: var(--agent);
+}
+
+.office-text {
+  color: var(--text);
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.office-input {
+  display: flex;
+  gap: 8px;
+}
+
+.office-input input {
+  flex: 1 1 auto;
+}
+
+@media (max-width: 900px) {
+  .office {
+    flex-direction: column;
+  }
+
+  .office-side {
+    flex: 0 0 auto;
+  }
+}
+
+.chat-ask {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--accent);
+}
+
+.chat-ask-title {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.chat-ask-title i {
+  color: var(--accent);
+}
+
+.chat-ask-diff {
+  max-height: 220px;
+  overflow: auto;
+  margin: 4px 0 0;
+  font-size: 11px;
+  white-space: pre;
+}
+
+.chat-ask-row {
+  display: flex;
+  gap: 6px;
+}
+
+.chats-rounds select {
+  width: auto;
+  padding: 5px 8px;
+  font-size: 12px;
+}

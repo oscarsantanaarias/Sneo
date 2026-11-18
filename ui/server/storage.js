@@ -156,6 +156,8 @@ export const readSettings = async () => {
     imageBaseUrl: data.imageBaseUrl || '',
     imageApiKey: data.imageApiKey || '',
     imageModel: data.imageModel || '',
+    plannerRoute: typeof data.plannerRoute === 'string' ? data.plannerRoute.slice(0, 80) : '',
+    styleFiles: Array.isArray(data.styleFiles) ? data.styleFiles.filter(item => typeof item === 'string' && item.trim()).slice(0, 12) : [],
     updatedAt: data.updatedAt || null
   };
 };

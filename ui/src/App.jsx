@@ -5,6 +5,7 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import PoolView from './PoolView.jsx';
 import EngineView from './EngineView.jsx';
+import TrainView from './TrainView.jsx';
 import AgentsView from './AgentsView.jsx';
 import PhoneView from './PhoneView.jsx';
 import ModelStore from './ModelStore.jsx';
@@ -83,6 +84,7 @@ const railViews = [
   {value: 'agents', label: 'Agents', icon: 'fa-solid fa-diagram-project'},
   {value: 'pool', label: 'Pool', icon: 'fa-solid fa-network-wired'},
   {value: 'engine', label: 'Engine', icon: 'fa-solid fa-gauge-high'},
+  {value: 'train', label: 'Train', icon: 'fa-solid fa-graduation-cap'},
   {value: 'phone', label: 'Phone', icon: 'fa-solid fa-mobile-screen'}
 ];
 
@@ -716,7 +718,7 @@ function App(){
   const [engineFiles, setEngineFiles] = useState({list: [], current: '', reachable: false, ready: false, warming: false, prepare: null});
   const [pickedFile, setPickedFile] = useState('');
   const [fileBusy, setFileBusy] = useState('');
-  const [memoryPlan, setMemoryPlan] = useState({self: '', screen: -1, slots: [], vramTotal: 0, ramTotal: 0, vram: 0, ram: 0, savedVram: 0, savedRam: 0, gpus: [], mainGpu: -1, savedMainGpu: -1, secondGpu: true, savedSecondGpu: true, helperGpu: -1, savedHelperGpu: -1, helperGb: 0, savedHelperGb: 0, drafts: 3, savedDrafts: 3, copyReach: 8, savedCopyReach: 8, holdRam: true, savedHoldRam: true, pinShare: 50, savedPinShare: 50, pinGb: 0, savedPinGb: 0, vision: false, savedVision: false, visionGpu: -1, savedVisionGpu: -1, visionReady: false, visionProblem: ''});
+  const [memoryPlan, setMemoryPlan] = useState({self: '', screen: -1, slots: [], vramTotal: 0, ramTotal: 0, vram: 0, ram: 0, savedVram: 0, savedRam: 0, gpus: [], mainGpu: -1, savedMainGpu: -1, secondGpu: true, savedSecondGpu: true, helperGpu: -1, savedHelperGpu: -1, helperGb: 0, savedHelperGb: 0, helperFirst: false, savedHelperFirst: false, drafts: 3, savedDrafts: 3, copyReach: 8, savedCopyReach: 8, holdRam: true, savedHoldRam: true, pinShare: 50, savedPinShare: 50, pinGb: 0, savedPinGb: 0, vision: false, savedVision: false, visionGpu: -1, savedVisionGpu: -1, visionReady: false, visionProblem: ''});
   const [recipeBusy, setRecipeBusy] = useState('');
   const [recipePlan, setRecipePlan] = useState(null);
   const [modelDrive, setModelDrive] = useState('');
@@ -1094,6 +1096,7 @@ function App(){
       }
 
       setSettings(res.settings);
+      loadPlannerRoutes();
 
     } catch(e) {
       console.log(e.message);
@@ -1161,6 +1164,7 @@ function App(){
       const secondGpu = res.secondGpu !== false;
       const helperGpu = Number(res.helperGpu ?? -1);
       const helperGb = Number(res.helperGb || 0);
+      const helperFirst = res.helperFirst === true;
       const drafts = res.speculate === false ? 0 : Number(res.draftLength || 3);
       const copyReach = Number(res.copyReach ?? 8);
       const holdRam = res.holdRam !== false;
@@ -1170,7 +1174,7 @@ function App(){
       const vision = res.vision === true;
       const visionGpu = Number(res.visionGpu ?? -1);
       setModelDrive(String(stats.drive || ''));
-      setMemoryPlan({self: res.self || '', screen: Number(res.selfScreen ?? -1), slots, vramTotal, ramTotal, vram, ram, savedVram: vram, savedRam: ram, gpus, mainGpu, savedMainGpu: mainGpu, secondGpu, savedSecondGpu: secondGpu, helperGpu, savedHelperGpu: helperGpu, helperGb, savedHelperGb: helperGb, drafts, savedDrafts: drafts, copyReach, savedCopyReach: copyReach, holdRam, savedHoldRam: holdRam, ramWhole, savedRamWhole: ramWhole, pinShare, savedPinShare: pinShare, pinGb, savedPinGb: pinGb, vision, savedVision: vision, visionGpu, savedVisionGpu: visionGpu, visionReady: res.visionReady === true, visionProblem: String(res.visionProblem || '')});
+      setMemoryPlan({self: res.self || '', screen: Number(res.selfScreen ?? -1), slots, vramTotal, ramTotal, vram, ram, savedVram: vram, savedRam: ram, gpus, mainGpu, savedMainGpu: mainGpu, secondGpu, savedSecondGpu: secondGpu, helperGpu, savedHelperGpu: helperGpu, helperGb, savedHelperGb: helperGb, helperFirst, savedHelperFirst: helperFirst, drafts, savedDrafts: drafts, copyReach, savedCopyReach: copyReach, holdRam, savedHoldRam: holdRam, ramWhole, savedRamWhole: ramWhole, pinShare, savedPinShare: pinShare, pinGb, savedPinGb: pinGb, vision, savedVision: vision, visionGpu, savedVisionGpu: visionGpu, visionReady: res.visionReady === true, visionProblem: String(res.visionProblem || '')});
     } catch(e) {
       setSavedContext(0);
     }
@@ -1185,12 +1189,13 @@ function App(){
         ? item
         : {...item, gb: item.kind === 'gpu' ? memoryPlan.vram : memoryPlan.ram, percent: 0, keep: 0});
     }
-    const gpusMoved = memoryPlan.mainGpu !== memoryPlan.savedMainGpu || memoryPlan.secondGpu !== memoryPlan.savedSecondGpu || memoryPlan.helperGpu !== memoryPlan.savedHelperGpu || memoryPlan.helperGb !== memoryPlan.savedHelperGb;
+    const gpusMoved = memoryPlan.mainGpu !== memoryPlan.savedMainGpu || memoryPlan.secondGpu !== memoryPlan.savedSecondGpu || memoryPlan.helperGpu !== memoryPlan.savedHelperGpu || memoryPlan.helperGb !== memoryPlan.savedHelperGb || memoryPlan.helperFirst !== memoryPlan.savedHelperFirst;
     if(gpusMoved){
       body.mainGpu = memoryPlan.mainGpu;
       body.secondGpu = memoryPlan.secondGpu;
       body.helperGpu = memoryPlan.helperGpu;
       body.helperGb = memoryPlan.helperGb;
+      body.helperFirst = memoryPlan.helperFirst;
     }
     const draftsMoved = memoryPlan.drafts !== memoryPlan.savedDrafts;
     if(draftsMoved){
@@ -1235,7 +1240,7 @@ function App(){
 
       setSavedContext(Number(res.context || engineContext));
       if(memoryMoved) setMemoryPlan(prev => ({...prev, savedVram: prev.vram, savedRam: prev.ram}));
-      if(gpusMoved) setMemoryPlan(prev => ({...prev, savedMainGpu: prev.mainGpu, savedSecondGpu: prev.secondGpu, savedHelperGpu: prev.helperGpu, savedHelperGb: prev.helperGb}));
+      if(gpusMoved) setMemoryPlan(prev => ({...prev, savedMainGpu: prev.mainGpu, savedSecondGpu: prev.secondGpu, savedHelperGpu: prev.helperGpu, savedHelperGb: prev.helperGb, savedHelperFirst: prev.helperFirst}));
       if(draftsMoved) setMemoryPlan(prev => ({...prev, savedDrafts: prev.drafts}));
       if(copyMoved) setMemoryPlan(prev => ({...prev, savedCopyReach: prev.copyReach}));
       if(holdMoved) setMemoryPlan(prev => ({...prev, savedHoldRam: prev.holdRam}));
@@ -1256,6 +1261,50 @@ function App(){
     setPickedFile(prev => list.some(item => item.path === prev)
       ? prev
       : current || list[0]?.path || '');
+  };
+
+  const [plannerRoutes, setPlannerRoutes] = useState([]);
+
+  const loadPlannerRoutes = async () => {
+    try {
+      const res = await fetch(`${apiUrl}/api/team/routes`).then(answer => answer.json());
+      setPlannerRoutes((res.routes || []).filter(item => item.kind !== 'local'));
+    } catch(e) {
+      setPlannerRoutes([]);
+    }
+  };
+
+  const pickPlanner = async (route) => {
+    try {
+      const req = await fetch(`${apiUrl}/api/planner`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({route})});
+      const res = await req.json();
+      if(!req.ok) throw new Error(res.message);
+      setSettings(prev => ({...prev, plannerRoute: res.plannerRoute}));
+    } catch(e) {
+      await uiAlert(e.message);
+    }
+  };
+
+  const pickStyleFiles = async () => {
+    try {
+      const req = await fetch(`${apiUrl}/api/style/pick`, {method: 'POST'});
+      const res = await req.json();
+      if(!req.ok) throw new Error(res.message);
+      setSettings(prev => ({...prev, styleFiles: res.styleFiles}));
+    } catch(e) {
+      await uiAlert(e.message);
+    }
+  };
+
+  const removeStyleFile = async (file) => {
+    try {
+      const req = await fetch(`${apiUrl}/api/style/remove`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path: file})});
+      const res = await req.json();
+      if(!req.ok) throw new Error(res.message);
+      setSettings(prev => ({...prev, styleFiles: res.styleFiles}));
+    } catch(e) {
+      await uiAlert(e.message);
+    }
   };
 
   const loadEngineFiles = async () => {
@@ -1414,6 +1463,17 @@ function App(){
   useEffect(() => {
     const timer = setTimeout(loadEngineFiles, loading ? 1500 : 300);
     return () => clearTimeout(timer);
+  }, [loading]);
+
+  // el motor puede cargar o soltar un modelo desde otra pantalla o desde los agentes, todas lo ven igual
+  useEffect(() => {
+    if(loading) return;
+    const timer = setInterval(loadEngineFiles, 3000);
+    window.addEventListener('focus', loadEngineFiles);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', loadEngineFiles);
+    };
   }, [loading]);
 
   useEffect(() => {
@@ -3128,6 +3188,7 @@ function App(){
         />
       )}
       {view === 'engine' && <EngineView apiUrl={apiUrl} />}
+      {view === 'train' && <TrainView apiUrl={apiUrl} />}
       {view === 'phone' && <PhoneView apiUrl={apiUrl} />}
       <div className="agents-host" style={{display: view === 'agents' ? 'flex' : 'none'}}>
         <AgentsView apiUrl={apiUrl} projects={projects} project={project} />
@@ -3254,6 +3315,40 @@ function App(){
                     </div>
                     <em className="field-help">{tr('Changes right away, without pressing Save.')}</em>
                   </div>
+                </div>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3><i className="fa-solid fa-route"></i>{tr('Plan with')}</h3>
+                  <p>{tr('Another model writes the plan for each task and the model on this PC follows it with its tools. Add routes in Agents > Models, for example Claude Code with your subscription.')}</p>
+                </div>
+                <div>
+                  <select value={settings.plannerRoute || ''} onFocus={loadPlannerRoutes} onChange={(e) => pickPlanner(e.target.value)}>
+                    <option value="">{tr('Nobody, the model on this PC plans alone')}</option>
+                    {plannerRoutes.map(item => <option key={item.id} value={item.id}>{item.name}{item.model ? ` · ${item.model}` : ''}</option>)}
+                    {settings.plannerRoute && !plannerRoutes.some(item => item.id === settings.plannerRoute) && <option value={settings.plannerRoute}>{tr('Saved route')}</option>}
+                  </select>
+                </div>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3><i className="fa-solid fa-pen-nib"></i>{tr('Your code style')}</h3>
+                  <p>{tr('Pick files you wrote and the agent writes new code the same way: names, braces, spacing and comments.')}</p>
+                </div>
+                <div className="style-files">
+                  {(settings.styleFiles || []).map(file => (
+                    <div key={file} className="style-file">
+                      <i className="fa-regular fa-file-code"></i>
+                      <span title={file}>{file}</span>
+                      <button type="button" className="btn btn-ghost" onClick={() => removeStyleFile(file)}>{tr('Remove')}</button>
+                    </div>
+                  ))}
+                  {!(settings.styleFiles || []).length && <em className="field-help">{tr('No files yet, the agent writes in its own style.')}</em>}
+                </div>
+                <div>
+                  <button type="button" className="btn" onClick={pickStyleFiles}>{tr('Choose files...')}</button>
                 </div>
               </section>
 
@@ -3494,6 +3589,16 @@ function App(){
                             );
                           })}
                         </div>
+                        {helperOrdinal >= 0 && (
+                          <div className="helper-order">
+                            <span className="field-label">{tr('Experts the helper keeps')}</span>
+                            <div className="segmented">
+                              <button type="button" className={memoryPlan.helperFirst ? '' : 'active'} onClick={() => setMemoryPlan(prev => ({...prev, helperFirst: false}))}>{tr('After pinned RAM')}</button>
+                              <button type="button" className={memoryPlan.helperFirst ? 'active' : ''} onClick={() => setMemoryPlan(prev => ({...prev, helperFirst: true}))}>{tr('Before pinned RAM')}</button>
+                            </div>
+                            <em className="field-help">{tr('After keeps the least used experts on the helper: best when the CPU and RAM are fast and the helper is slow. Before keeps the most used ones after the main GPU: best when the helper is fast or the CPU and RAM are slow, for example two GTX 1070 with a small CPU. Try both and keep the faster one. The model reloads when you press Save.')}</em>
+                          </div>
+                        )}
                         <em className="field-help">
                           {tr('The main GPU runs every layer and reads the long prompts, so it works best in the x16 slot')}{memoryPlan.screen === 1 ? tr('; it shows your screen, so leave about 1 GB for Windows') : ''}{tr('. The helper keeps the experts that do not fit in the main GPU and computes them beside the CPU; 0 GB lets it take all it can. Off leaves a GPU free for games or other apps. The model reloads when you press Save.')}
                         </em>

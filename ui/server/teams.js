@@ -2,9 +2,11 @@ import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { askClaude, claudeModels } from './claude.js';
+import { askClaudeCode, claudeCodeModels } from './claudecode.js';
 import { paths } from './config.js';
 import { askPlain } from './model.js';
 import { cleanText } from './storage.js';
+import { getProjectPath } from './projects.js';
 
 const routesFile = () => path.join(paths.dataDir, 'agent-routes.json');
 const agentsFile = () => path.join(paths.dataDir, 'agent-chat.json');
@@ -16,19 +18,21 @@ export const routePresets = [
   {kind: 'claude', name: 'Claude', baseUrl: '', model: 'claude-opus-5-5', parallel: 4},
   {kind: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', model: '', parallel: 4},
   {kind: 'openai', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: '', parallel: 4},
-  {kind: 'openai', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: '', parallel: 4}
+  {kind: 'openai', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: '', parallel: 4},
+  {kind: 'claudecode', name: 'Claude Code (your subscription)', baseUrl: '', model: '', parallel: 1},
+  {kind: 'openai', name: 'Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-flash-latest', parallel: 4}
 ];
 
 const cleanRoute = (item, kept = {}) => {
-  const kind = ['local', 'claude', 'openai'].includes(item?.kind) ? item.kind : 'openai';
+  const kind = ['local', 'claude', 'claudecode', 'openai'].includes(item?.kind) ? item.kind : 'openai';
   const key = item?.apiKey === '***' ? kept.apiKey || '' : cleanText(item?.apiKey);
 
   return {
     id: cleanText(item?.id) || crypto.randomUUID(),
     kind,
     name: cleanText(item?.name).slice(0, 60) || 'Route',
-    baseUrl: kind === 'claude' ? '' : cleanText(item?.baseUrl).replace(/\/+$/, ''),
-    apiKey: kind === 'local' ? '' : key,
+    baseUrl: kind === 'claude' || kind === 'claudecode' ? '' : cleanText(item?.baseUrl).replace(/\/+$/, ''),
+    apiKey: kind === 'local' || kind === 'claudecode' ? '' : key,
     model: cleanText(item?.model).slice(0, 120),
     effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(item?.effort) ? item.effort : 'medium',
     parallel: Math.min(16, Math.max(1, parseInt(item?.parallel, 10) || (kind === 'local' ? 1 : 4)))
@@ -62,13 +66,53 @@ export const saveRoutes = async (list) => {
   return routes;
 };
 
-export const routeLabel = (route) => route.kind === 'claude'
+export const routeLabel = (route) => route.kind === 'claudecode'
+  ? `${route.name} · ${claudeCodeModels.find(item => item.id === route.model)?.name || route.model || 'Default'}`
+  : route.kind === 'claude'
   ? `${route.name} · ${claudeModels.find(item => item.id === route.model)?.name || route.model}`
   : route.model ? `${route.name} · ${route.model}` : route.name;
 
+// en esta pc el modelo elegido en la ruta manda: si es el cargado contesta y si es otro se cambia antes
+export const ensureLocalModel = async (route, signal) => {
+  if(route.kind !== 'local' || !thisPc.test(route.baseUrl || '') || !route.model){
+    return;
+  }
+
+  const base = route.baseUrl.replace(/\/v1$/, '');
+  const state = await fetch(`${base}/api/models`, {signal: AbortSignal.timeout(5000)}).then(answer => answer.json());
+  const wanted = (state.models || []).find(item => item.name === route.model || item.path === route.model);
+
+  if(!wanted){
+    throw new Error(`${route.model} is not in the models folder of this PC`);
+  }
+
+  if(state.currentModel === wanted.path && (state.ready || state.warming)){
+    if(state.ready) return;
+  } else {
+    const answer = await fetch(`${base}/api/models/load`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({path: wanted.path})}).then(item => item.json());
+    if(answer.success === false) throw new Error(`${wanted.name} did not load`);
+  }
+
+  const until = Date.now() + 15 * 60 * 1000;
+  while(Date.now() < until){
+    if(signal?.aborted) throw new Error('Stopped');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const now = await fetch(`${base}/api/models`, {signal: AbortSignal.timeout(5000)}).then(answer => answer.json()).catch(() => ({}));
+    if(now.problem) throw new Error(`${wanted.name} did not load: ${now.problem}`);
+    if(now.currentModel === wanted.path && now.ready) return;
+    if(now.currentModel && now.currentModel !== wanted.path && !now.warming) throw new Error(`another model was loaded while waiting for ${wanted.name}`);
+  }
+  throw new Error(`${wanted.name} took too long to load`);
+};
+
 export const askRoute = async (route, messages, tools, run) => {
+  await ensureLocalModel(route, run?.signal);
   if(route.kind === 'claude'){
     return await askClaude(route, messages, tools, run);
+  }
+
+  if(route.kind === 'claudecode'){
+    return await askClaudeCode(route, messages, tools, run);
   }
 
   return await askPlain(route, messages, tools, run);
@@ -145,7 +189,7 @@ export const mostAgents = 100;
 
 export const defaultAgents = [
   {id: 'orchestrator', name: 'Orchestrator', focus: 'Task manager · Main agent', route: '', tools: false},
-  {id: 'coder', name: 'Coder', focus: 'Code generation · Developer', route: '', tools: true},
+  {id: 'coder', name: 'Coder', focus: 'Code generation · Developer', route: '', tools: true, edits: true},
   {id: 'researcher', name: 'Researcher', focus: 'Research · Information retrieval', route: '', tools: true},
   {id: 'reviewer', name: 'Reviewer', focus: 'Quality control · Testing', route: '', tools: true}
 ];
@@ -155,7 +199,9 @@ export const cleanAgent = (item, i = 0) => ({
   name: cleanText(item?.name).slice(0, 40) || `Agent ${i + 1}`,
   focus: cleanText(item?.focus).slice(0, 80),
   route: cleanText(item?.route).slice(0, 120),
-  tools: item?.tools === true
+  tools: item?.tools === true || item?.edits === true || (item?.edits === undefined && cleanText(item?.id) === 'coder'),
+  // el coder escribe codigo de entrada y los demas solo si se les prende
+  edits: item?.edits === true || (item?.edits === undefined && cleanText(item?.id) === 'coder')
 });
 
 export const readAgents = async () => {
@@ -185,9 +231,14 @@ const dropThinking = (text) => String(text || '')
   .trim();
 
 // una vuelta de chat con un agente: sin proyecto contesta directo y con proyecto puede leer el codigo
-export const chatAgent = async ({agent, route, history, project, peers = [], run, onStep, runWorker}) => {
+export const chatAgent = async ({agent, route, history, project, peers = [], rounds = 100, run, onStep, runWorker}) => {
   const clean = cleanAgent(agent);
-  const persona = `You are ${clean.name}${clean.focus ? ` (${clean.focus})` : ''}, one agent of a team that works with the user. ${peers.length ? `The other agents are ${peers.join(', ')}; messages that start with "From <name>:" were forwarded from them.` : ''} Answer as ${clean.name}: concrete, short when the question is short, in the language of the user.`;
+  const handoff = peers.length
+    ? ` The other agents are ${peers.join(', ')}. To give one of them work, write a line that starts with @Name: and the message, for example "@${peers[0]}: check the login code and tell me what breaks". Only those lines reach them, so never say you sent, asked or dispatched something without writing that line. Their answer comes back to you as a message that starts with "Report from <name>:". Messages that start with "From <name>:" were sent to you by that agent.`
+    : '';
+  const where = project ? await getProjectPath(project).catch(() => '') : '';
+  const place = project ? ` The team works on the project "${project}"${where ? ` in ${where}` : ''}.` : '';
+  const persona = `You are ${clean.name}${clean.focus ? ` (${clean.focus})` : ''}, one agent of a team that works with the user.${place}${handoff} Answer as ${clean.name}: concrete, short when the question is short, in the language of the user.`;
   const past = (Array.isArray(history) ? history : [])
     .filter(item => item && String(item.content || '').trim())
     .slice(-30)
@@ -199,12 +250,16 @@ export const chatAgent = async ({agent, route, history, project, peers = [], run
 
   if(clean.tools && project && runWorker){
     const last = past.pop();
-    const result = await withSlot(route, () => runWorker({name: clean.name, role: clean.focus || clean.name, task: last.content, project, route, run, onStep, history: past, persona}));
-    return {content: dropThinking(result.answer), tools: (result.tools || []).map(item => item.tool)};
+    const writer = clean.edits
+      ? ' You are the one who changes the code: apply fixes yourself in the project files. Use replace_in_file with the exact text to change for edits, write_file only for new files, and run the code with sandbox_run or run_command to check it works. Never ask another agent to apply a change you can make, and say which files and lines you changed.'
+      : ' You can only read the project. When something must change, describe the exact change and hand it to the agent that edits code.';
+    const result = await withSlot(route, () => runWorker({name: clean.name, role: clean.focus || clean.name, task: last.content, project, route, run, onStep, history: past, persona: persona + writer, rounds, canEdit: clean.edits}));
+    return {content: dropThinking(result.answer), tools: (result.tools || []).map(item => item.tool), thinking: ''};
   }
 
   const reply = await withSlot(route, () => askRoute(route, [{role: 'system', content: persona}, ...past], null, run));
-  return {content: dropThinking(reply.content), tools: []};
+  const thinking = String(reply.reasoning || (String(reply.content || '').match(/<think>([\s\S]*?)(<\/think>|$)/i) || [])[1] || '').trim();
+  return {content: dropThinking(reply.content), tools: [], thinking: thinking.slice(-4000)};
 };
 
 export const runTeam = async ({task, project, mode, planner, workers, lead, maxAgents, onEvent, signal, runWorker}) => {

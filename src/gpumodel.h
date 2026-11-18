@@ -182,6 +182,7 @@ struct GpuModel {
     GridTables tables = {};
     HelperCard helper;
     bool useHelper = true;
+    bool helperFirst = false;
     int helperOrdinal = -1;
     uint64_t helperCap = 0;
     Matrix embed, pleTable;
@@ -1049,8 +1050,8 @@ struct GpuModel {
     bool moveHy4(int slot, bool keep);
     void hySaveHeat();
     void hyFillRam();
-    void hyHostMultiply(const std::vector<HostProduct>& list, bool residual, int rows);
     void hyFillWarm();
+    void hyHostMultiply(const std::vector<HostProduct>& list, bool residual, int rows);
     void hyOpenHelper(const std::string& source, const std::vector<uint8_t>& blob);
     bool hyHelperLaunch(HyLayer& L, int n, const std::vector<int>& slots, const std::vector<int>& pairsList);
     bool hyLoadDraft(const std::string& modelPath);
@@ -1064,6 +1065,13 @@ struct GpuModel {
     void hyEngramHost(const int* positions, int n);
     void hyExpertsHost(HyLayer& L, int n, const std::vector<char>& onCpu);
     void hyExperts(int l, int n);
+    void hySwapIn(int l, int n, const int* ids);
+    void hyRelayExperts(int l, int n);
+    void hyFork();
+    void hyBack();
+    void hyJoin();
+    bool hyRelay(int n);
+    void hyHead(int n);
     void hyUpload(int l, int e, int slot);
     void hyBatch(HyLayer& L, uint64_t base, const int* slots, const int* pairs, uint64_t slotsOn, uint64_t pairsOn, int count);
     void hyLayer(int l, int n, int part = 0);
@@ -2099,12 +2107,15 @@ struct GpuModel {
         int helpPerLayer = openHelper(sizes + quantKernelSource + modelKernelSource, blob, perExpert, expertCount - held);
         warmPerLayer = std::min(warmPerLayer, expertCount - held - helpPerLayer);
 
-        int helpFrom = recentPerLayer > 0
-            ? held + warmPerLayer
-            : held;
-        int warmFrom = recentPerLayer > 0
+        // el ayudante toma los expertos que siguen a los de la tarjeta principal o los que quedan despues de la ram fijada
+        // una tarjeta lenta como una 1070 rinde igual que la ram y va despues, una rapida como otra 3090 rinde mas antes
+        bool helperAhead = helperFirst || recentPerLayer == 0;
+        int helpFrom = helperAhead
             ? held
-            : held + helpPerLayer;
+            : held + warmPerLayer;
+        int warmFrom = helperAhead
+            ? held + helpPerLayer
+            : held;
         std::vector<std::array<uint64_t, 4>> hostReads;
         std::vector<std::array<uint64_t, 4>> helperReads;
         for(int l = firstLayer; l < endLayer; l++){

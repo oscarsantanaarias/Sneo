@@ -77,6 +77,18 @@ public static class SneoFolderPicker {
 }
 `;
 
+// varios archivos con la ventana de abrir de windows encima de sneo
+export const pickFiles = async ({title = 'Select files'} = {}) => {
+  const script = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\nAdd-Type -AssemblyName System.Windows.Forms\n$owner = New-Object System.Windows.Forms.Form\n$owner.TopMost = $true\n$dialog = New-Object System.Windows.Forms.OpenFileDialog\n$dialog.Multiselect = $true\n$dialog.Title = $env:SNEO_PICK_TITLE\nif($dialog.ShowDialog($owner) -eq 'OK'){ $dialog.FileNames -join \"`n\" }";
+  const result = await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+    timeout: 300000,
+    windowsHide: false,
+    maxBuffer: 1024 * 100,
+    env: {...process.env, SNEO_PICK_TITLE: String(title || '')}
+  });
+  return String(result.stdout || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
+};
+
 // los textos van por variables de entorno, nunca dentro del script, asi ninguna comilla puede cerrar el texto
 export const pickFolder = async ({title = 'Select a folder', start = '', button = 'Select folder'} = {}) => {
   const script = `$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\nAdd-Type -TypeDefinition @'${folderDialog}'@\n[SneoFolderPicker]::Pick($env:SNEO_PICK_TITLE, $env:SNEO_PICK_START, $env:SNEO_PICK_BUTTON)`;

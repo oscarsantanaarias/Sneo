@@ -1,9 +1,10 @@
 import path from 'path';
-import { readFile } from 'fs/promises';
+import { readdir, readFile } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import { paths } from './config.js';
 import { askModel, askModelChat, contextWindow, readEngine } from './model.js';
-import { askRoute } from './teams.js';
+import { askRoute, readRoutes, routeLabel } from './teams.js';
+import { askInSession, chatSession } from './claudecode.js';
 import { cleanText, makeId, pushAgentLog, readSettings } from './storage.js';
 import { checkTool, runSubTool, runTool, toolQueueWrite } from './tools.js';
 import { runStore, stopChildren } from './runs.js';
@@ -489,17 +490,62 @@ export const toolParallelAgents = async ({project, task, agents}, run) => {
   return results;
 };
 
-export const runSubAgent = async ({name, role, task, project, model, run, route = null, onStep = null, history = [], persona = ''}) => {
+// archivos de codigo del usuario para que el agente escriba igual que el y no a su manera
+const styleBlock = async (files) => {
+  if(!files?.length) return '';
+  const each = Math.floor(12000 / files.length);
+  const parts = [];
+  for(const file of files){
+    const text = await readFile(file, 'utf8').catch(() => '');
+    if(!text.trim()) continue;
+    parts.push(`--- ${path.basename(file)} ---\n${text.slice(0, each)}`);
+  }
+  if(!parts.length) return '';
+  return `
+
+THE USER'S CODE STYLE (always follow it):
+These are files the user wrote. Whenever you write or change code, write it exactly the way they write it: the same naming, indentation, brace placement, spacing, early returns, line length, comment language, comment style and how much they comment, and the same habits. Copy the style, not the content.
+${parts.join('\n\n')}`;
+};
+
+// las herramientas que suma un agente que escribe codigo, con los mismos permisos que el workspace
+const editTools = ['replace_in_file', 'write_file', 'create_folder', 'rename_path', 'run_command'];
+
+// lo que se muestra al lado de cada herramienta en el panel del agente
+const stepDetail = (args) => {
+  if(!args || typeof args !== 'object') return '';
+  const value = args.path || args.file || args.query || args.pattern || args.command || args.url || args.address || args.text || '';
+  return String(value).replace(/\s+/g, ' ').slice(0, 90);
+};
+
+// los resultados viejos se recortan para que un agente con muchas vueltas no se pase del contexto
+const toolResultBudget = 150000;
+const isToolResult = (item) => item.role === 'tool' || (item.role === 'user' && /^Tool \S+ result:\n/.test(String(item.content || '')));
+const shrinkResults = (messages) => {
+  let total = messages.reduce((sum, item) => sum + String(item.content || '').length, 0);
+
+  for(let i = 0; i < messages.length - 6 && total > toolResultBudget; i++){
+    const item = messages[i];
+    const text = String(item.content || '');
+    if(!isToolResult(item) || text.length <= 600) continue;
+    const kept = `${text.slice(0, 500)}\n(older result shortened, run the tool again if you need it whole)`;
+    total -= text.length - kept.length;
+    messages[i] = {...item, content: kept};
+  }
+};
+
+export const runSubAgent = async ({name, role, task, project, model, run, route = null, onStep = null, history = [], persona = '', rounds = 6, canEdit = false}) => {
   const system = `
 ${persona || `You are subagent ${name}. Role: ${role}.\nYou work in parallel with other subagents.`}
 Active project: ${project || 'none'}.
 
 Allowed tools (call them with native function calling):
-list_files, read_file, read_range, glob, grep, search_files, ghidra, ida, re_search, sandbox_run, git_status, git_diff, codebase_search.
+list_files, read_file, read_range, glob, grep, search_files, ghidra, ida, re_search, sandbox_run, git_status, git_diff, codebase_search${canEdit ? ', replace_in_file, write_file, create_folder, rename_path, run_command' : ''}.
 
-Do not write or delete files.
+${canEdit ? 'Change files with replace_in_file (exact text to replace) and write_file only for new files. Read a file before you edit it. After editing, run it to check it works.' : 'Do not write or delete files.'}
 Deliver clear findings, risks and the next step.
 `.trim();
+  const toolList = canEdit ? [...subAgentToolSchemas, ...toolSchemas.filter(item => editTools.includes(item.function?.name))] : subAgentToolSchemas;
 
   const messages = [
     {role: 'system', content: system},
@@ -509,16 +555,30 @@ Deliver clear findings, risks and the next step.
   const tools = [];
   const subRun = run ? {...run, onEvent: null} : null;
 
-  for(let i = 0; i < 6; i++){
+  const repeats = new Map();
+  const repeated = (tool, args) => {
+    const key = `${tool} ${JSON.stringify(args || {})}`;
+    const count = (repeats.get(key) || 0) + 1;
+    repeats.set(key, count);
+    return count > 2;
+  };
+
+  for(let i = 0; i < rounds; i++){
+    shrinkResults(messages);
     const reply = route
-      ? await askRoute(route, messages, subAgentToolSchemas, subRun)
-      : await askModelChat(messages, subAgentToolSchemas, subRun, model);
+      ? await askRoute(route, messages, toolList, subRun)
+      : await askModelChat(messages, toolList, subRun, model);
     const rawAnswer = reply.content || '';
     const answer = rawAnswer
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
       .replace(/<think>[\s\S]*$/gi, '')
       .trim();
     const nativeCalls = Array.isArray(reply.tool_calls) ? reply.tool_calls : [];
+    const thinking = String(reply.reasoning || (rawAnswer.match(/<think>([\s\S]*?)(<\/think>|$)/i) || [])[1] || '').trim();
+
+    if(thinking){
+      onStep?.({thought: thinking.slice(-2000)});
+    }
 
     if(nativeCalls.length){
       const calls = nativeCalls.map(item => ({item, args: parseNativeArgs(item.function?.arguments)}));
@@ -526,7 +586,7 @@ Deliver clear findings, risks and the next step.
 
       for(const call of calls){
         const asked = call.item.function?.name || '';
-        onStep?.({tool: asked});
+        onStep?.({tool: asked, detail: stepDetail(call.args)});
         const resolved = resolveCall(asked, call.args || {}, '');
         const toolName = resolved.name || asked;
         const callArgs = normalizeToolArgs(toolName, resolved.args || {}, null);
@@ -546,7 +606,11 @@ Deliver clear findings, risks and the next step.
           result = {error: 'Subagents can only read. Report the change you would make instead.'};
         } else {
           try {
-            result = await runSubTool(toolName, callArgs);
+            result = repeated(toolName, callArgs)
+              ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
+              : canEdit && editTools.includes(toolName)
+                ? await runTool(toolName, callArgs)
+                : await runSubTool(toolName, callArgs);
           } catch(e) {
             result = {error: String(e.message || e)};
           }
@@ -585,8 +649,14 @@ Deliver clear findings, risks and the next step.
     let result;
     const toolStart = Date.now();
 
+    onStep?.({tool: call.tool, detail: stepDetail(callArgs)});
+
     try {
-      result = await runSubTool(call.tool, callArgs);
+      result = repeated(call.tool, callArgs)
+        ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
+        : canEdit && editTools.includes(call.tool)
+          ? await runTool(call.tool, callArgs)
+          : await runSubTool(call.tool, callArgs);
     } catch(e) {
       result = {error: String(e.message || e)};
     }
@@ -599,6 +669,19 @@ Deliver clear findings, risks and the next step.
     tools.push({tool: call.tool, args: callArgs, result});
     messages.push({role: 'assistant', content: answer});
     messages.push({role: 'user', content: `Tool ${call.tool} result:\n${toon(result).slice(0, 6000)}\n\nFinish your answer or request another tool.`});
+  }
+
+  // sin vueltas no se tira lo leido: se le pide la conclusion con lo que ya tiene
+  try {
+    shrinkResults(messages);
+    messages.push({role: 'user', content: 'You used all your tool calls. Do not call any tool. Write your final answer now from what you already read: findings with file, function and line, and what is still unverified.'});
+    const reply = route
+      ? await askRoute(route, messages, null, subRun)
+      : await askModelChat(messages, null, subRun, model);
+    const answer = String(reply.content || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*$/gi, '').trim();
+    if(answer) return {name, role, answer, tools};
+  } catch(e) {
+    if(run?.signal?.aborted) throw e;
   }
 
   return {
@@ -788,6 +871,88 @@ const blockName = (block, blocks, answer, message, used) => {
   return `${makeId()}-${clean}`;
 };
 
+const projectFiles = async (root, most = 300) => {
+  const found = [];
+  const skip = new Set(['node_modules', '.git', 'dist', 'build', 'target', '.next', 'venv', '__pycache__']);
+  const walk = async (dir, rel, depth) => {
+    if(found.length >= most || depth > 5) return;
+    let list = [];
+    try {
+      list = await readdir(dir, {withFileTypes: true});
+    } catch(e) {
+      return;
+    }
+    for(const item of list){
+      if(found.length >= most) return;
+      if(item.name.startsWith('.')) continue;
+      if(item.isDirectory()){
+        if(!skip.has(item.name)) await walk(path.join(dir, item.name), rel + item.name + '/', depth + 1);
+      } else {
+        found.push(rel + item.name);
+      }
+    }
+  };
+  await walk(root, '', 0);
+  return found;
+};
+
+// otro modelo arma el plan y el de esta pc lo ejecuta con sus herramientas
+const planFirst = async ({settings, message, history, projectRoot, chatId, run, onEvent}) => {
+  if(!settings.plannerRoute || String(message || '').trim().length < 12){
+    return '';
+  }
+
+  const route = (await readRoutes()).find(item => item.id === settings.plannerRoute);
+  if(!route){
+    return '';
+  }
+
+  const files = projectRoot ? await projectFiles(projectRoot) : [];
+  const past = history.slice(-4)
+    .map(item => `${item.role === 'assistant' ? 'Assistant' : 'User'}: ${String(typeof item.content === 'string' ? item.content : '').slice(0, 1500)}`)
+    .filter(line => line.length > 12)
+    .join('\n\n');
+  const ask = [
+    past ? `Recent conversation:\n${past}` : '',
+    files.length ? `Project files:\n${files.join('\n')}` : 'No project is open.',
+    `New request from the user:\n${message}`
+  ].filter(Boolean).join('\n\n');
+
+  const system = 'You plan coding work for another model that runs on the user PC with tools to read, write and run files. You cannot see file contents, only names, and you see what that model reported after each task. Write a short numbered plan (at most 8 steps): which files to read first, what to change in each, how to verify it runs, and traps to avoid. No code longer than a few lines. Write it in the language of the user. If the request is just chat or a question that needs no work, answer only NO_PLAN.';
+  onEvent?.({type: 'tool', tool: `planning with ${routeLabel(route)}`});
+  try {
+    let reply;
+
+    // claude code guarda una sesion por chat y recuerda los planes y lo que hizo el modelo local
+    if(route.kind === 'claudecode' && chatId){
+      const filesKey = `${projectRoot}|${files.length}|${files.join('|').length}`;
+      const kept = chatSession(chatId);
+      const lastDone = [...history].reverse().find(item => item?.role === 'assistant' && typeof item.content === 'string' && item.content.trim());
+      const next = [
+        lastDone ? `What the local model did and answered after the last request:\n${lastDone.content.slice(0, 4000)}` : '',
+        kept?.filesKey !== filesKey ? (files.length ? `Project files now:\n${files.join('\n')}` : 'No project is open now.') : '',
+        `New request from the user:\n${message}`
+      ].filter(Boolean).join('\n\n');
+      reply = await askInSession({route, chatId, system, first: ask, next, run: {signal: run.signal}, note: {filesKey}});
+      onEvent?.({type: 'tool', tool: reply.resumed ? 'planner: same Claude session as this chat' : 'planner: new Claude session for this chat'});
+    } else {
+      reply = await askRoute(route, [{role: 'system', content: system}, {role: 'user', content: ask}], null, {signal: run.signal});
+    }
+
+    const plan = String(reply.content || '').trim();
+    if(!plan || /^NO_PLAN\b/i.test(plan)){
+      onEvent?.({type: 'tool', tool: 'planner: no plan needed'});
+      return '';
+    }
+    onEvent?.({type: 'thought', thought: `Plan from ${routeLabel(route)}:\n${plan}`});
+    return `\n\nPLAN FROM THE PLANNER (${routeLabel(route)}): follow it, but check each step against the real code and fix the plan if the code says otherwise.\n${plan.slice(0, 6000)}`;
+  } catch(e) {
+    if(run.signal?.aborted) throw e;
+    onEvent?.({type: 'tool', tool: `planner failed: ${String(e.message || e).slice(0, 120)}`});
+    return '';
+  }
+};
+
 export const getAgentAnswer = async (options = {}) => {
   const live = runStore.getStore();
 
@@ -957,6 +1122,7 @@ Good (what you DO):
 4. If something is wrong, fix it and visual_check again.
 5. Report: "I created the store in index.html (project X). I opened and verified it: looks good, no errors. It has catalog, cart and checkout."
 If the user asks for React/Node with deps: do NOT use interactive scaffolders (npm create vite, create-react-app, npx tailwindcss init) - they PROMPT and HANG when run without a keyboard. Instead write the project files directly with write_file: package.json (with deps + scripts), vite.config.js, tailwind.config.js, postcss.config.js, index.html, and src/ files. Then run "npm.cmd install" and verify with "npm.cmd run build" (NEVER "npm run dev"/"npm start", they never exit). Read the REAL output; only say it works once you saw it compile without error. To SEE the web page use visual_check.`;
+  const planBlock = await planFirst({settings, message: effectiveMessage, history, projectRoot, chatId: live.chatId, run, onEvent});
   const replyLang = settings.language === 'en' ? 'English' : 'Spanish';
   const system = `
 You are an autonomous senior engineer working on the user's machine. You act like a professional with judgment, not an autocomplete. Always reply to the user in ${replyLang}, clear and direct.
@@ -1046,7 +1212,7 @@ Ports 3001, 8000, 9090, 9096 and 9097 belong to Sneo on this PC: a project serve
 To edit code with preview/approve, use propose_patch.
 After editing, report file, lines added/removed/changed and location.
 Do not delete files unless the user clearly asks.
-`.trim() + seniorBlock + skillsBlock;
+`.trim() + seniorBlock + skillsBlock + await styleBlock(settings.styleFiles) + planBlock;
 
   const window = await contextWindow(settings);
   const guard = new LoopWatch({mode, window});

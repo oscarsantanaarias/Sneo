@@ -111,7 +111,9 @@ $engineStale = $sourceNewest -and (Test-Path $master) -and (Test-Path $worker) -
 if(-not (Test-Path $master) -or -not (Test-Path $worker) -or $engineStale){
     if(-not (Test-Path "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe")){
         if(-not (Test-Path $master)){
-            Write-Host "master.exe is missing and Visual Studio with C++ is not installed to build it."
+            Write-Host "master.exe is missing. The zip from the green Code button on GitHub is only the source code."
+            Write-Host "Download the ready to run zip from https://github.com/oscarsantanaarias/Sneo/releases, unzip it and run start.bat from there."
+            Write-Host "To build it yourself, install Visual Studio with the Desktop development with C++ workload and run start.bat again."
             exit 1
         }
         Write-Host "The engine code is newer than master.exe but Visual Studio with C++ is not installed, keeping the current engine."
@@ -128,6 +130,7 @@ if(-not (Test-Path $master) -or -not (Test-Path $worker) -or $engineStale){
         & cmd /c "`"$root\build.bat`" nopause"
         if(-not (Test-Path $master)){
             Write-Host "The engine could not be built."
+            Write-Host "Download the ready to run zip from https://github.com/oscarsantanaarias/Sneo/releases instead, or add the Desktop development with C++ workload in Visual Studio Installer and run start.bat again."
             exit 1
         }
     }

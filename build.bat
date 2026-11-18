@@ -6,7 +6,9 @@ set "finder=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if exist "%finder%" for /f "usebackq delims=" %%i in (`"%finder%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "vcvars=%%i\VC\Auxiliary\Build\vcvars64.bat"
 if not defined vcvars set "vcvars=C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
 if not exist "%vcvars%" (
-    echo Visual Studio with the C++ tools was not found, install it and run build.bat again.
+    echo Visual Studio with the C++ tools was not found.
+    echo Open Visual Studio Installer, click Modify, check Desktop development with C++ and run build.bat again.
+    echo Or download the ready to run zip from https://github.com/oscarsantanaarias/Sneo/releases
     goto done
 )
 call "%vcvars%" >nul 2>nul

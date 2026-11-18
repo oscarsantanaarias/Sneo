@@ -10,11 +10,13 @@
 #include <random>
 #include <deque>
 #include <condition_variable>
+#ifdef _WIN32
 #include <shellapi.h>
 #include <psapi.h>
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "psapi.lib")
+#endif
 
 namespace fs = std::filesystem;
 
@@ -273,7 +275,7 @@ int askDoor(const std::string& host, int port, const std::string& method, const 
     if(s == INVALID_SOCKET) return 0;
 
     DWORD timeout = 6000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    socketWait(s, SO_RCVTIMEO, timeout);
 
     std::string out = method + " " + path + " HTTP/1.1\r\n"
                       "Host: " + host + ":" + std::to_string(port) + "\r\n"
@@ -406,7 +408,7 @@ std::string stateJson(WorkerState& state) {
 
 void servePage(SOCKET client, WorkerState& state) {
     DWORD timeout = 5000;
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    socketWait(client, SO_RCVTIMEO, timeout);
 
     std::string raw;
     std::string head;
@@ -807,7 +809,7 @@ void serveCompute(SOCKET master, WorkerState& state, const std::string& address,
     // un master viejo lee solo los tres primeros
     int32_t range[4] = {model->firstLayer, model->endLayer, model->relayLimit, (int32_t)rowsFeatures};
     DWORD forever = 0;
-    setsockopt(master, SOL_SOCKET, SO_RCVTIMEO, (char*)&forever, sizeof(forever));
+    socketWait(master, SO_RCVTIMEO, forever);
     if(!sendPacket(master, PACKET_READY, range, sizeof(range))){
         closesocket(master);
         state.computing = false;
@@ -1020,7 +1022,7 @@ void serveMaster(SOCKET master, WorkerState& state, const std::string& address, 
     }
 
     DWORD forever = 0;
-    setsockopt(master, SOL_SOCKET, SO_RCVTIMEO, (char*)&forever, sizeof(forever));
+    socketWait(master, SO_RCVTIMEO, forever);
     std::cout << "pool at " << address << " connected" << std::endl;
     NodeStats greeting = readNode(state.cacheRoot);
     sendPacket(master, PACKET_NODE_INFO, &greeting, sizeof(greeting));
@@ -1290,6 +1292,7 @@ int main(int argc, char* argv[]) {
     char hostText[64] = {};
     std::string listenHost = GetEnvironmentVariableA("SNEO_WORKER_HOST", hostText, sizeof(hostText)) > 0 ? hostText : "0.0.0.0";
     bool thisPcOnly = listenHost.rfind("127.", 0) == 0;
+#ifdef _WIN32
     bool ruleMissing = !thisPcOnly && system("netsh advfirewall firewall show rule name=\"Sneo worker\" >nul 2>&1") != 0;
     bool publicNetwork = !thisPcOnly && system("powershell -NoProfile -Command \"if(Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq 'Public' }){ exit 1 }\" >nul 2>&1") != 0;
     fs::path setup = fs::path(runtimeFolder()).parent_path() / "tools" / "pool_setup.ps1";
@@ -1298,6 +1301,10 @@ int main(int argc, char* argv[]) {
         std::string args = "-NoProfile -ExecutionPolicy Bypass -File \"" + setup.string() + "\"";
         ShellExecuteA(nullptr, "runas", "powershell.exe", args.c_str(), nullptr, SW_SHOWNORMAL);
     }
+#else
+    // en linux el firewall lo maneja cada distro: solo se avisa del puerto que tiene que estar abierto
+    if(!thisPcOnly) std::cout << "if this PC has a firewall, let tcp port " << state.tcpPort << " in so the pool can reach it" << std::endl;
+#endif
 
     SOCKET server = listenTcp(state.tcpPort, listenHost);
     if(server == INVALID_SOCKET){
@@ -1318,12 +1325,16 @@ int main(int argc, char* argv[]) {
             }
         }).detach();
         std::cout << "open " << url << " to ask a pool to let this machine in" << std::endl;
+#ifdef _WIN32
         if(openPage) ShellExecuteA(nullptr, "open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+        if(openPage && system(("xdg-open '" + url + "' >/dev/null 2>&1 &").c_str()) != 0) std::cout << "open the page by hand, xdg-open is missing" << std::endl;
+#endif
     }
 
     while(true){
         sockaddr_in from = {};
-        int length = sizeof(from);
+        socklen_t length = sizeof(from);
         SOCKET master = accept(server, (sockaddr*)&from, &length);
         if(master == INVALID_SOCKET) continue;
 
@@ -1332,7 +1343,7 @@ int main(int argc, char* argv[]) {
 
         std::thread([master, &state, ip = std::string(address)](){
             DWORD timeout = 10000;
-            setsockopt(master, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+            socketWait(master, SO_RCVTIMEO, timeout);
             PacketHead head;
             std::vector<char> body;
             if(!readPacket(master, head, body, sizeof(HelloBody)) || head.kind != PACKET_HELLO || body.size() < sizeof(HelloBody)){

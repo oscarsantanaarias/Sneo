@@ -5,7 +5,7 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <windows.h>
+#include "platform.h"
 #include "gguf.h"
 #include "json.h"
 #include <string>

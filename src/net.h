@@ -3,10 +3,22 @@
 #include <vector>
 #include <thread>
 #include <chrono>
+#ifdef _WIN32
 #include <iphlpapi.h>
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+#endif
+
+// tiempo de espera de un socket en ms, 0 es sin limite: windows lo toma en ms y linux en segundos y microsegundos
+inline void socketWait(SOCKET s, int option, DWORD ms) {
+#ifdef _WIN32
+    setsockopt(s, SOL_SOCKET, option, (char*)&ms, sizeof(ms));
+#else
+    timeval wait = {(time_t)(ms / 1000), (suseconds_t)((ms % 1000) * 1000)};
+    setsockopt(s, SOL_SOCKET, option, (char*)&wait, sizeof(wait));
+#endif
+}
 
 enum PacketKind : uint32_t {
     PACKET_HELLO = 1,
@@ -145,13 +157,13 @@ inline SOCKET connectTcp(const std::string& ip, int port, int timeoutMs) {
     FD_ZERO(&writable);
     FD_SET(s, &writable);
     timeval wait = {timeoutMs / 1000, (timeoutMs % 1000) * 1000};
-    if(select(0, nullptr, &writable, nullptr, &wait) != 1){
+    if(select((int)s + 1, nullptr, &writable, nullptr, &wait) != 1){
         closesocket(s);
         return INVALID_SOCKET;
     }
 
     int error = 0;
-    int length = sizeof(error);
+    socklen_t length = sizeof(error);
     getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&error, &length);
     if(error != 0){
         closesocket(s);
@@ -164,6 +176,24 @@ inline SOCKET connectTcp(const std::string& ip, int port, int timeoutMs) {
     return s;
 }
 
+#ifndef _WIN32
+// las direcciones ipv4 de las placas de red prendidas, sin la propia ni las automaticas 169.254
+inline std::vector<std::string> localAddresses() {
+    std::vector<std::string> found;
+    ifaddrs* list = nullptr;
+    if(getifaddrs(&list) != 0) return found;
+    for(ifaddrs* item = list; item; item = item->ifa_next){
+        if(!item->ifa_addr || item->ifa_addr->sa_family != AF_INET) continue;
+        if(!(item->ifa_flags & IFF_UP) || (item->ifa_flags & IFF_LOOPBACK)) continue;
+        char ip[64] = {};
+        inet_ntop(AF_INET, &((sockaddr_in*)item->ifa_addr)->sin_addr, ip, sizeof(ip));
+        if(strncmp(ip, "169.254.", 8) == 0 || strncmp(ip, "127.", 4) == 0) continue;
+        found.push_back(ip);
+    }
+    freeifaddrs(list);
+    return found;
+}
+#else
 inline std::vector<std::string> localAddresses() {
     std::vector<std::string> found;
     if(!startSockets()) return found;
@@ -205,6 +235,7 @@ inline std::vector<std::string> localAddresses() {
     closesocket(probe);
     return found;
 }
+#endif
 
 inline uint64_t nowMs() {
     return (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();

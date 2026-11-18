@@ -1,12 +1,28 @@
 #pragma once
 
-#include <windows.h>
-#include <dxgi1_4.h>
-#include <pdh.h>
+#include "platform.h"
 #include <cstdint>
 #include <cstring>
 #include <cwchar>
 #include <vector>
+
+#ifndef _WIN32
+// en linux no hay presupuesto de wddm: la tarjeta no le quita memoria al proceso, asi que no hay nada que vigilar
+struct ProcessVram {
+    bool open() { return false; }
+    bool read(uint64_t&) { return false; }
+    void close() {}
+};
+
+struct VramBudget {
+    bool open(const char*) { return false; }
+    bool read(uint64_t&, uint64_t&) { return false; }
+    bool readShared(uint64_t&, uint64_t&) { return false; }
+    void close() {}
+};
+#else
+#include <dxgi1_4.h>
+#include <pdh.h>
 
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "pdh.lib")
@@ -98,3 +114,4 @@ struct VramBudget {
         adapter = nullptr;
     }
 };
+#endif

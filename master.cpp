@@ -17,9 +17,11 @@
 #include <set>
 #include <random>
 #include <ctime>
+#ifdef _WIN32
 #include <psapi.h>
 
 #pragma comment(lib, "psapi.lib")
+#endif
 
 namespace fs = std::filesystem;
 
@@ -219,7 +221,7 @@ bool openFront(const std::string& name, const std::string& ip, int port, const s
         return false;
     }
     DWORD timeout = 15 * 60 * 1000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    socketWait(s, SO_RCVTIMEO, timeout);
     HelloBody hello = {};
     strncpy_s(hello.key, key.c_str(), _TRUNCATE);
     hello.version = protocolVersion;
@@ -250,7 +252,7 @@ bool openFront(const std::string& name, const std::string& ip, int port, const s
         return false;
     }
     DWORD forever = 0;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&forever, sizeof(forever));
+    socketWait(s, SO_RCVTIMEO, forever);
     // una tarjeta anterior a las RTX 30 verifica a lo sumo 5 filas por pasada y no podia guardar pasadas mas largas,
     // asi que el nodo dice su limite (un nodo viejo no lo dice y se usa 5)
     int32_t nodeLimit = 5;
@@ -492,6 +494,23 @@ void restartEngine(const std::string& path) {
     // el motor nuevo espera a que este salga y suelte su ram fijada antes de repartir el modelo
     SetEnvironmentVariableA("SNEO_PARENT", std::to_string(GetCurrentProcessId()).c_str());
 
+#ifndef _WIN32
+    std::cout.flush();
+    pid_t child = fork();
+    if(child == 0){
+        // el motor nuevo no se queda con el puerto ni los archivos de este, solo con la salida
+        for(long fd = 3, top = sysconf(_SC_OPEN_MAX); fd < (top > 0 ? top : 4096); fd++) close((int)fd);
+        execl("/bin/sh", "sh", "-c", command.c_str(), (char*)nullptr);
+        _exit(127);
+    }
+    if(child < 0){
+        std::cout << "the engine could not restart itself (error " << errno << "), close and open Sneo" << std::endl;
+        return;
+    }
+    std::cout << "the engine restarts itself and loads " << fs::path(path).filename().string() << std::endl;
+    std::cout.flush();
+    _exit(0);
+#else
     std::vector<HANDLE> pass;
     for(HANDLE h : {GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE)}){
         if(!h || h == INVALID_HANDLE_VALUE || std::find(pass.begin(), pass.end(), h) != pass.end()) continue;
@@ -524,6 +543,7 @@ void restartEngine(const std::string& path) {
     std::cout << "the engine restarts itself and loads " << fs::path(path).filename().string() << std::endl;
     std::cout.flush();
     ExitProcess(0);
+#endif
 }
 
 void releaseBrain() {
@@ -1012,7 +1032,7 @@ std::string connectNode(std::string ip, int port, std::string key, std::string& 
     }
 
     DWORD timeout = 20000;
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
+    socketWait(s, SO_RCVTIMEO, timeout);
 
     HelloBody hello = {};
     strncpy_s(hello.key, key.c_str(), _TRUNCATE);
@@ -1454,6 +1474,12 @@ std::string diskJson() {
                 std::string name = entry.path().filename().string();
                 std::transform(name.begin(), name.end(), name.begin(), ::tolower);
                 if(!entry.is_regular_file(walk) || name.size() < 5 || name.substr(name.size() - 5) != ".gguf" || name.rfind("mmproj", 0) == 0 || name.rfind("mtp", 0) == 0) continue;
+#ifndef _WIN32
+                struct stat info;
+                if(stat(entry.path().string().c_str(), &info) != 0) continue;
+                if(!seen.insert({(uint64_t)info.st_dev, (uint64_t)info.st_ino}).second) continue;
+                modelsBytes += (uint64_t)info.st_size;
+#else
                 HANDLE file = CreateFileW(entry.path().wstring().c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
                 if(file == INVALID_HANDLE_VALUE) continue;
                 BY_HANDLE_FILE_INFORMATION info = {};
@@ -1463,6 +1489,7 @@ std::string diskJson() {
                 uint64_t index = ((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow;
                 if(!seen.insert({(uint64_t)info.dwVolumeSerialNumber, index}).second) continue;
                 modelsBytes += ((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+#endif
             }
             ownBytes = 0;
             std::error_code e;
@@ -2754,7 +2781,7 @@ void handleClient(SOCKET client) {
 
     if(route == "POST /api/shutdown"){
         sockaddr_in peer = {};
-        int length = sizeof(peer);
+        socklen_t length = sizeof(peer);
         bool local = getpeername(client, (sockaddr*)&peer, &length) == 0 && peer.sin_family == AF_INET && (ntohl(peer.sin_addr.s_addr) >> 24) == 127;
         if(!local){
             replyHttp(client, 403, "{\"error\":\"only this PC can stop the engine\"}");
@@ -2855,8 +2882,8 @@ void handleClient(SOCKET client) {
 
 void handleDoor(SOCKET client, std::string ip) {
     DWORD timeout = 4000;
-    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout));
-    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeout, sizeof(timeout));
+    socketWait(client, SO_RCVTIMEO, timeout);
+    socketWait(client, SO_SNDTIMEO, timeout);
 
     uint64_t now = nowMs();
     bool flooded = false;
@@ -2907,6 +2934,27 @@ void handleDoor(SOCKET client, std::string ip) {
 
     if(req.method == "GET" && req.path == "/hello"){
         std::string links;
+#ifndef _WIN32
+        ifaddrs* list = nullptr;
+        if(getifaddrs(&list) == 0){
+            for(ifaddrs* item = list; item; item = item->ifa_next){
+                if(!item->ifa_addr || item->ifa_addr->sa_family != AF_INET || !(item->ifa_flags & IFF_UP) || (item->ifa_flags & IFF_LOOPBACK)) continue;
+                char ip[64] = {};
+                inet_ntop(AF_INET, &((sockaddr_in*)item->ifa_addr)->sin_addr, ip, sizeof(ip));
+                if(strncmp(ip, "127.", 4) == 0) continue;
+                std::string base = std::string("/sys/class/net/") + item->ifa_name;
+                std::error_code e;
+                std::string kind = fs::exists(base + "/wireless", e) ? "wifi" : fs::exists(base + "/device", e) ? "ethernet" : "other";
+                long mbps = 0;
+                if(FILE* speed = fopen((base + "/speed").c_str(), "r")){
+                    if(fscanf(speed, "%ld", &mbps) != 1 || mbps < 0) mbps = 0;
+                    fclose(speed);
+                }
+                links += std::string(links.empty() ? "" : ",") + "{\"ip\":" + quoteJson(ip) + ",\"kind\":\"" + kind + "\",\"mbps\":" + std::to_string(mbps) + "}";
+            }
+            freeifaddrs(list);
+        }
+#else
         ULONG size = 16384;
         std::vector<uint8_t> buffer(size);
         ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
@@ -2929,6 +2977,7 @@ void handleDoor(SOCKET client, std::string ip) {
                 links += std::string(links.empty() ? "" : ",") + "{\"ip\":" + quoteJson(ip) + ",\"kind\":\"" + kind + "\",\"mbps\":" + std::to_string(adapter->TransmitLinkSpeed / 1000000ULL) + "}";
             }
         }
+#endif
         std::string hello;
         {
             std::lock_guard<std::mutex> guard(engine.lock);
@@ -3084,10 +3133,10 @@ void doorLoop() {
         FD_ZERO(&ready);
         FD_SET(door, &ready);
         timeval wait = {0, 500000};
-        if(select(0, &ready, nullptr, nullptr, &wait) != 1) continue;
+        if(select((int)door + 1, &ready, nullptr, nullptr, &wait) != 1) continue;
 
         sockaddr_in from = {};
-        int length = sizeof(from);
+        socklen_t length = sizeof(from);
         SOCKET client = accept(door, (sockaddr*)&from, &length);
         if(client == INVALID_SOCKET) continue;
 
@@ -3131,11 +3180,16 @@ int main(int argc, char* argv[]) {
     if(GetEnvironmentVariableA("SNEO_PARENT", parentText, sizeof(parentText)) > 0){
         SetEnvironmentVariableA("SNEO_PARENT", nullptr);
         uint64_t began = nowMs();
+#ifndef _WIN32
+        pid_t parent = (pid_t)std::strtoul(parentText, nullptr, 10);
+        while(parent > 0 && kill(parent, 0) == 0 && nowMs() - began < 60000) Sleep(100);
+#else
         HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)std::strtoul(parentText, nullptr, 10));
         if(parent){
             WaitForSingleObject(parent, 60000);
             CloseHandle(parent);
         }
+#endif
         uint64_t most = 0;
         for(int steady = 0; steady < 4 && nowMs() - began < 30000; Sleep(250)){
             MEMORYSTATUSEX memory = {};

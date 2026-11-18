@@ -1,6 +1,5 @@
 #pragma once
-#include <windows.h>
-#include <psapi.h>
+#include "platform.h"
 #include "qwen4.h"
 #include "gpukernels.h"
 #include "hostdot.h"
@@ -2343,7 +2342,7 @@ struct GpuModel {
             uint64_t left = tableBytes;
             for(const auto& t : tables){
                 for(uint64_t at = 0; at < t.second && left > 0 && !warmStop; at += 64ULL << 20){
-                    uint64_t bytes = std::min({64ULL << 20, t.second - at, left});
+                    uint64_t bytes = std::min<uint64_t>({64ULL << 20, t.second - at, left});
                     WIN32_MEMORY_RANGE_ENTRY r = {(PVOID)(t.first + at), (SIZE_T)bytes};
                     PrefetchVirtualMemory(GetCurrentProcess(), 1, &r, 0);
                     uint32_t sink = 0;

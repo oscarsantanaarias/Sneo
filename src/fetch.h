@@ -1,12 +1,64 @@
 #pragma once
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <winhttp.h>
 #include <string>
 #include <vector>
 #include <functional>
 #include <cstdint>
+
+#ifndef _WIN32
+#include <cstdio>
+#include "platform.h"
+// en linux las descargas van por curl: el rango se pide igual que en windows y lo que llega se entrega de a pedazos
+struct WebLink {
+    bool get(const std::string& url, uint64_t begin, uint64_t end, const std::function<bool(const char*, size_t)>& sink, std::string& error) {
+        if(url.find('\'') != std::string::npos){
+            error = "the address has a quote in it";
+            return false;
+        }
+        bool ranged = end > begin;
+        std::string command = "curl -sSfL --retry 3 --connect-timeout 15 -A Sneo/1";
+        if(ranged) command += " -r " + std::to_string(begin) + "-" + std::to_string(end - 1);
+        command += " '" + url + "' 2>/dev/null";
+        FILE* pipe = popen(command.c_str(), "r");
+        if(!pipe){
+            error = "curl did not start, it is needed for downloads on linux";
+            return false;
+        }
+        std::vector<char> buffer(1 << 20);
+        uint64_t received = 0;
+        bool fine = true;
+        size_t got = 0;
+        while(fine && (got = fread(buffer.data(), 1, buffer.size(), pipe)) > 0){
+            received += got;
+            if(!sink(buffer.data(), got)){
+                error = "stopped";
+                fine = false;
+            }
+        }
+        int status = pclose(pipe);
+        if(fine && status != 0){
+            error = "download failed for " + url + " (curl " + std::to_string(status) + ")";
+            return false;
+        }
+        if(fine && ranged && received != end - begin){
+            error = "short read: " + std::to_string(received) + " of " + std::to_string(end - begin) + " bytes";
+            return false;
+        }
+        return fine;
+    }
+
+    bool text(const std::string& url, std::string& out, std::string& error) {
+        out.clear();
+        return get(url, 0, 0, [&](const char* data, size_t length){
+            out.append(data, length);
+            return out.size() < (64u << 20);
+        }, error);
+    }
+};
+#else
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <winhttp.h>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -134,3 +186,4 @@ struct WebLink {
         }, error);
     }
 };
+#endif

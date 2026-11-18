@@ -1,12 +1,9 @@
 #pragma once
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <windows.h>
+#include "platform.h"
+#ifdef _WIN32
 #include <pdh.h>
 #include <winioctl.h>
-#include <intrin.h>
+#endif
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -21,20 +18,25 @@
 inline std::atomic<bool> stopGenerating{false};
 #pragma comment(lib, "advapi32.lib")
 
+// windows baja la velocidad de los programas que no tienen la ventana adelante: aca se le pide que no; linux no hace eso
 inline void keepFullSpeed() {
+#ifdef _WIN32
     PROCESS_POWER_THROTTLING_STATE state = {};
     state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
     state.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
     state.StateMask = 0;
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+#endif
 }
 
 inline void keepThreadFullSpeed() {
+#ifdef _WIN32
     THREAD_POWER_THROTTLING_STATE state = {};
     state.Version = THREAD_POWER_THROTTLING_CURRENT_VERSION;
     state.ControlMask = THREAD_POWER_THROTTLING_EXECUTION_SPEED;
     state.StateMask = 0;
     SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state, sizeof(state));
+#endif
 }
 
 inline std::string missingCpuFeatures() {
@@ -247,6 +249,28 @@ inline uint64_t fileTimeValue(FILETIME t) {
 
 enum DriveKind : uint32_t { DriveUnknown, DriveHdd, DriveSsd, DriveNvme, DriveUsb };
 
+#ifndef _WIN32
+// en linux el disco de la carpeta sale de /sys: el dispositivo del archivo, nvme por el nombre y disco con aguja por rotational
+inline uint32_t readDriveKind(const std::string& folder) {
+    struct stat st;
+    if(stat(folder.empty() ? "." : folder.c_str(), &st) != 0) return DriveUnknown;
+    std::string link = "/sys/dev/block/" + std::to_string(major(st.st_dev)) + ":" + std::to_string(minor(st.st_dev));
+    char real[PATH_MAX] = {};
+    if(!realpath(link.c_str(), real)) return DriveUnknown;
+    std::filesystem::path device(real);
+    std::error_code e;
+    if(!std::filesystem::exists(device / "queue", e)) device = device.parent_path();
+    std::string name = device.filename().string();
+    if(name.rfind("nvme", 0) == 0) return DriveNvme;
+    if(std::string(real).find("/usb") != std::string::npos) return DriveUsb;
+    FILE* f = fopen((device / "queue" / "rotational").string().c_str(), "r");
+    if(!f) return DriveUnknown;
+    int spinning = -1;
+    if(fscanf(f, "%d", &spinning) != 1) spinning = -1;
+    fclose(f);
+    return spinning < 0 ? DriveUnknown : spinning ? DriveHdd : DriveSsd;
+}
+#else
 inline uint32_t readDriveKind(const std::string& folder) {
     char full[MAX_PATH] = {};
     char root[MAX_PATH] = {};
@@ -283,6 +307,7 @@ inline uint32_t readDriveKind(const std::string& folder) {
         ? DriveHdd
         : DriveSsd;
 }
+#endif
 
 inline const char* driveName(uint32_t kind) {
     static const char* names[] = {"unknown", "hdd", "ssd", "nvme", "usb"};
@@ -327,8 +352,10 @@ inline HostStats readHost(const std::string& modelFolder) {
     static bool first = true;
     static HostStats fixed = {};
     static uint64_t lastIdle = 0, lastKernel = 0, lastUser = 0;
+#ifdef _WIN32
     static PDH_HQUERY query = nullptr;
     static PDH_HCOUNTER readCounter = nullptr, writeCounter = nullptr;
+#endif
     static std::string counterDrive;
     static std::string driveFolder;
     static uint32_t driveKind = DriveUnknown;
@@ -341,8 +368,30 @@ inline HostStats readHost(const std::string& modelFolder) {
         DWORD size = sizeof(fixed.nodeName);
         GetComputerNameA(fixed.nodeName, &size);
 
+#ifdef _WIN32
         DWORD nameSize = sizeof(fixed.cpuName);
         RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", "ProcessorNameString", RRF_RT_REG_SZ, nullptr, fixed.cpuName, &nameSize);
+#else
+        // en linux el nombre y los nucleos fisicos salen de /proc/cpuinfo: pares distintos de paquete y nucleo
+        if(FILE* info = fopen("/proc/cpuinfo", "r")){
+            char line[512];
+            int package = 0;
+            std::vector<std::pair<int, int>> seen;
+            while(fgets(line, sizeof(line), info)){
+                if(!fixed.cpuName[0] && strncmp(line, "model name", 10) == 0){
+                    const char* value = strchr(line, ':');
+                    if(value) snprintf(fixed.cpuName, sizeof(fixed.cpuName), "%s", value + 2);
+                    size_t end = strlen(fixed.cpuName);
+                    if(end && fixed.cpuName[end - 1] == '\n') fixed.cpuName[end - 1] = 0;
+                }
+                int value = 0;
+                if(sscanf(line, "physical id : %d", &value) == 1) package = value;
+                if(sscanf(line, "core id : %d", &value) == 1 && std::find(seen.begin(), seen.end(), std::make_pair(package, value)) == seen.end()) seen.push_back({package, value});
+            }
+            fclose(info);
+            fixed.cores = (uint32_t)seen.size();
+        }
+#endif
 
         DWORD bytes = 0;
         GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &bytes);
@@ -357,7 +406,9 @@ inline HostStats readHost(const std::string& modelFolder) {
         }
         fixed.threads = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
 
+#ifdef _WIN32
         PdhOpenQueryA(nullptr, 0, &query);
+#endif
 
         FILETIME idle, kernel, user;
         GetSystemTimes(&idle, &kernel, &user);
@@ -388,6 +439,7 @@ inline HostStats readHost(const std::string& modelFolder) {
         host.ramFree = memory.ullAvailPhys;
     }
 
+#ifdef _WIN32
     std::string drive = std::filesystem::absolute(modelFolder.empty() ? "." : modelFolder).root_name().string();
     if(query && drive != counterDrive){
         counterDrive = drive;
@@ -409,6 +461,7 @@ inline HostStats readHost(const std::string& modelFolder) {
             host.diskWriteBytes = (uint64_t)value.largeValue;
         }
     }
+#endif
 
     uint64_t tick = GetTickCount64();
     if(driveAt == 0 || modelFolder != driveFolder || tick - driveAt > 60000){

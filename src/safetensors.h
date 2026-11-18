@@ -1,6 +1,6 @@
 #pragma once
 #include "json.h"
-#include <windows.h>
+#include "platform.h"
 #include <string>
 #include <vector>
 #include <map>

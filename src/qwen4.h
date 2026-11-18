@@ -303,7 +303,7 @@ struct Model {
                 if(t.expert || t.name == "token_embd.weight" || t.name == "per_layer_token_embd.weight") continue;
                 locked += t.bytes;
             }
-            memoryCap = std::max(memoryCap, locked + (2ULL << 30));
+            memoryCap = std::max<uint64_t>(memoryCap, locked + (2ULL << 30));
         }
         SetProcessWorkingSetSizeEx(GetCurrentProcess(), locked + (256ULL << 20), (SIZE_T)memoryCap, QUOTA_LIMITS_HARDWS_MAX_ENABLE | QUOTA_LIMITS_HARDWS_MIN_DISABLE);
 

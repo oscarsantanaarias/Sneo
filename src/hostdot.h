@@ -1,6 +1,6 @@
 #pragma once
 #include "quant.h"
-#include <intrin.h>
+#include "platform.h"
 
 struct HostPacked {
     std::vector<int8_t> levels;
@@ -271,7 +271,16 @@ inline bool hostVnni() {
 
 template<bool VNNI>
 inline __m256i byteDots(__m256i mag, __m256i x) {
+#ifndef _WIN32
+    // gcc pide la opcion avxvnni para todo el archivo y con ella podria usarla en cualquier lado: la instruccion va escrita a mano
+    if constexpr(VNNI){
+        __m256i sum = _mm256_setzero_si256();
+        __asm__("{vex} vpdpbusd %2, %1, %0" : "+x"(sum) : "x"(mag), "x"(x));
+        return sum;
+    }
+#else
     if constexpr(VNNI) return _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), mag, x);
+#endif
     else return _mm256_madd_epi16(_mm256_maddubs_epi16(mag, x), _mm256_set1_epi16(1));
 }
 

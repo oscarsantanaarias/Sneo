@@ -1,9 +1,23 @@
 #pragma once
-#include <windows.h>
-#include <wincodec.h>
+#include "platform.h"
 #include <string>
 #include <vector>
 #include <cstdint>
+
+struct Picture {
+    int width = 0;
+    int height = 0;
+    std::vector<uint8_t> rgb;
+};
+
+#ifndef _WIN32
+// en linux las imagenes todavia no se leen: el motor contesta que falta en vez de mandar una imagen vacia al modelo
+inline bool readPicture(const std::string&, Picture&, std::string& error) {
+    error = "pictures are not read on linux yet";
+    return false;
+}
+#else
+#include <wincodec.h>
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "propsys.lib")
@@ -13,12 +27,6 @@ template<typename T> struct Held {
     ~Held() { if(p) p->Release(); }
     T** operator&() { return &p; }
     T* operator->() { return p; }
-};
-
-struct Picture {
-    int width = 0;
-    int height = 0;
-    std::vector<uint8_t> rgb;
 };
 
 inline bool readPicture(const std::string& bytes, Picture& out, std::string& error) {
@@ -92,6 +100,7 @@ inline bool readPicture(const std::string& bytes, Picture& out, std::string& err
     }
     return finish(true);
 }
+#endif
 
 inline bool decodeBase64(const std::string& text, std::string& out) {
     static int8_t table[256];

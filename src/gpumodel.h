@@ -1049,6 +1049,7 @@ struct GpuModel {
     bool moveHy4(int slot, bool keep);
     void hySaveHeat();
     void hyFillRam();
+    void hyHostMultiply(const std::vector<HostProduct>& list, bool residual, int rows);
     void hyFillWarm();
     void hyOpenHelper(const std::string& source, const std::vector<uint8_t>& blob);
     bool hyHelperLaunch(HyLayer& L, int n, const std::vector<int>& slots, const std::vector<int>& pairsList);

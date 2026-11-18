@@ -88,9 +88,18 @@ struct HyCache {
     double cpuMs = 0, waitMs = 0, uploadMs = 0, gpuQueueMs = 0;
     // bytes de expertos que leyo la cpu, para ver a cuantos GB/s anda contra la ram
     uint64_t cpuBytes = 0;
+    // memoria de trabajo de los expertos en la cpu: se reusa entre capas en vez de pedirla y limpiarla cada vez
+    std::vector<float> hostIn, hostGate, hostUp, hostDown;
+    HostPacked hostPackIn, hostPackMid;
+    // tiempo de cada etapa de los expertos en la cpu y bytes de las dos multiplicaciones
+    double stageMs[6] = {};
+    uint64_t stageBytes[2] = {};
+    // entrada de un solo nivel como en la gpu y filas por tarea de cada hilo
+    bool cpuPlain = false;
+    int cpuRows = 0;
     uint64_t launches = 0;
     uint32_t lastStep = 0;
-    int budget = 6;
+    int budget = 2;
     // segundo nivel: ram fijada que la gpu lee directo por pcie mientras la cpu hace el resto
     int warmSlots = 0;
     uint8_t* warmHost = nullptr;
@@ -197,6 +206,9 @@ struct HyBuffers {
     int widePairsMost = 8192;
     // filas por tramo de atencion en el prompt largo: mas filas por kernel que los 64 de siempre
     int wideSub = 0;
+    // con pocas filas cada capa va grabada en un grafo: un lanzamiento en vez de unos 35
+    bool graphs = false;
+    uint64_t graphRuns = 0;
     // posicion de la primera fila de la pasada que corre ahora
     int firstPos = 0;
     // indexpool por fila: clave, consulta de 16 cabezas, pesos, puntajes por grupo y lista de posiciones elegidas
@@ -708,7 +720,7 @@ extern "C" __global__ void hyIdxScore(const float* q, const float* w, const floa
     __shared__ float ws[16];
     int t = blockIdx.y;
     int own = positions[t] >> 2;
-    if(own <= keep) return;
+    if(own <= keep || (int)(blockIdx.x * blockDim.x) >= own) return;
     const float4* src = (const float4*)(q + (u64)t * 2048);
     for(int i = threadIdx.x; i < 512; i += blockDim.x) qs[i >> 5][i & 31] = src[i];
     if(threadIdx.x < 16) ws[threadIdx.x] = w[(u64)t * 16 + threadIdx.x];

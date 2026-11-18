@@ -62,7 +62,7 @@ Tencent's Hy4-flash runs on this branch. It is big: 157 GB at Q4_K_M and 12B act
 - For faster writing, make a `dfly2` folder next to them and put `model-00148-of-00148.safetensors` from [tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) in it (1.7 GB). That file holds DFly2, the model's own draft layers. Without it Hy4 still runs, only slower.
 - The first load builds the GPU kernels and reads the experts into RAM, about a minute. The experts used most stay on the card and the list is kept in `profiles\Hy4-flash-Q4_K_M.hy4heat`, so it starts warm.
 
-On an RTX 3090 with 96 GB of DDR5 it reads long prompts at 400 to 500 tok/s, writes code at 30 to 37 tok/s and prose at about 25 tok/s after a 10K token prompt. Tool calls work with the coding agent.
+On an RTX 3090 with 96 GB of DDR5 it reads long prompts at 400 to 500 tok/s, writes code at 40 to 50 tok/s and prose at about 30 tok/s after a 10K token prompt. Tool calls work with the coding agent.
 
 ### Where to put them
 

@@ -86,6 +86,7 @@ struct Engine {
     std::string savedFolder;
     int selfScreen = -1;
     uint64_t diskExperts = 0;
+    uint64_t ramExperts = 0;
     uint64_t shareBytes = 0;
     uint64_t vramHeld = 0;
     std::string modelId;
@@ -690,7 +691,7 @@ void loadBrain(std::string path, uint64_t ticket) {
         brain.gpu->tailSkip = engine.fastRouting ? 7 : 0;
         brain.gpu->foresee = engine.foresee;
         brain.gpu->draftSure = (float)engine.draftSure;
-        std::cout << "routing: " << (engine.fastRouting ? "fast, missed experts ranked 8 to 10 are skipped" : "exact") << std::endl;
+        std::cout << "routing: " << (!engine.fastRouting ? "exact" : brain.gpu->hy4 ? "fast, missed experts ranked 10 to 16 are skipped" : "fast, missed experts ranked 8 to 10 are skipped") << std::endl;
         std::cout << "draft layer: " << (brain.gpu->drafting ? (brain.gpu->tiedDraft ? "built into the model" : "loaded") : brain.gpu->draftProblem.empty() ? "not found" : brain.gpu->draftProblem) << std::endl;
         if(brain.gpu->legacy) std::cout << "gpu: no Ampere tensor cores, prompts run on the dp4a tile kernels" << std::endl;
     }
@@ -720,12 +721,15 @@ void loadBrain(std::string path, uint64_t ticket) {
         std::lock_guard<std::mutex> guard(engine.lock);
         engine.diskExperts = brain.gpu && !fits ? expertBytes - held : 0;
         engine.shareBytes = brain.gpu ? shareBytes : 0;
+        // hy4 lee de la ram los expertos que no estan en la vram, por la cache de windows del archivo mapeado
+        engine.ramExperts = brain.gpu && brain.gpu->hy4 && !fits ? expertBytes - held : 0;
+        if(brain.gpu && brain.gpu->hy4) engine.diskExperts = 0;
     }
     if(brain.gpu && brain.firstLayer == 0){
         std::error_code e;
         bool draftHere = fs::exists(fs::path(modelsHome()) / "Qwen3.8-Flash-Next.draft-q2.gguf", e) || fs::exists(fs::path(path).parent_path() / "Qwen3.8-Flash-Next.draft-q2.gguf", e);
-        if(!brain.gpu->packed && !fits) queuePrepare("pack:" + path);
-        if(!draftHere && expertCount == 512 && engine.speculate) queuePrepare("draft");
+        if(!brain.gpu->packed && !fits && !brain.gpu->hy4) queuePrepare("pack:" + path);
+        if(!draftHere && expertCount == 512 && engine.speculate && !brain.gpu->hy4) queuePrepare("draft");
     }
     if(brain.gpu && brain.gpu->remote) std::cout << "layers 0.." << brain.firstLayer - 1 << " run on " << frontNode << ", layers " << brain.firstLayer << ".." << brain.gpu->layers.size() - 1 << " on this pc" << std::endl;
     busy.unlock();
@@ -1075,6 +1079,7 @@ void statsLoop() {
         {
             std::lock_guard<std::mutex> guard(engine.lock);
             self.host.heldGpu = std::max<uint64_t>(self.host.heldGpu, brainState == 2 ? engine.vramHeld : 0);
+            if(brainState == 2) self.host.heldRam = std::max<uint64_t>(self.host.heldRam, engine.ramExperts);
         }
         bool watchRam = false;
         std::vector<std::shared_ptr<RemoteNode>> list;
@@ -1988,6 +1993,8 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     }
     bool gemmaModel = brain.gpu && brain.gpu->gemma;
     options.gemma = gemmaModel;
+    bool hyModel = brain.gpu && brain.gpu->hy4;
+    options.hy = hyModel;
     std::string prompt, error;
     if(!renderChat(request.messages, request.tools, options, prompt, error)){
         replyHttp(client, 400, problemJson(error));
@@ -2021,7 +2028,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     }
 
     Tokenizer& tokenizer = *words;
-    int boundaryMark = tokenizer.find(gemmaModel ? "<turn|>" : "<|im_end|>");
+    int boundaryMark = tokenizer.find(gemmaModel ? "<turn|>" : hyModel ? hyEnd() : "<|im_end|>");
     bool side = body["sneo_side"].truthy();
     TextStream stream;
     bool first = true;
@@ -2058,6 +2065,13 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     };
     hooks.piece = [&](int id){ return stream.push(tokenizer.tokenText(id)); };
     hooks.tokenText = [&](int id){ return tokenizer.tokenText(id); };
+    if(hyModel){
+        hooks.thinkOpen = hyMark("think");
+        hooks.thinkClose = hyMark("think", true);
+        hooks.toolOpen = hyMark("tool_calls");
+        hooks.toolClose = hyMark("tool_calls", true);
+        hooks.closeThinking = hyMark("think", true);
+    }
     if(gemmaModel){
         hooks.thinkOpen = "<|channel>thought";
         hooks.thinkClose = "<channel|>";
@@ -2154,13 +2168,14 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     uint64_t helperRowsBefore = brain.gpu ? brain.gpu->helper.rows : 0;
     double helperWaitBefore = brain.gpu ? brain.gpu->helperWaitMs : 0;
     std::string helperProblem = brain.gpu ? brain.gpu->helper.problem : "";
-    if(brain.gpu && engine.speculate && body["speculate"].truthy(brain.gpu->file.arch == "qwen4exp" || brain.gpu->drafting)){
-        hooks.guessStart = brain.gpu->tiedDraft ? 2 : 0;
+    if(brain.gpu && engine.speculate && body["speculate"].truthy(brain.gpu->file.arch == "qwen4exp" || brain.gpu->drafting || brain.gpu->hy4)){
+        hooks.guessStart = brain.gpu->tiedDraft || brain.gpu->hy4 ? 2 : 0;
         hooks.contextLimit = brain.gpu->contextLimit;
-        hooks.verifyLimit = brain.gpu->drafting ? brain.gpu->relayLimit : brain.gpu->verifyLimit;
+        hooks.verifyLimit = brain.gpu->hy4 ? brain.gpu->hyBuffers.everyCap : brain.gpu->drafting ? brain.gpu->relayLimit : brain.gpu->verifyLimit;
         if(brain.gpu->remote && frontLink.relayLimit > 1) hooks.verifyLimit = std::min(hooks.verifyLimit, frontLink.relayLimit);
         hooks.draftLimit = engine.draftLength;
         hooks.copyLimit = engine.copyReach;
+        if(brain.gpu->hy4) hooks.copyLeast = 8;
         if(brain.gpu->drafting) hooks.propose = [&](int token, int most){
             uint64_t asked = nowMicros();
             std::vector<int> drafts = brain.gpu->draftPropose(token, std::min(most, brain.gpu->relayLimit - 1));
@@ -2242,7 +2257,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     std::cout << "generated " << result.outputTokens << " tokens (" << record.outputSpeed << " tok/s), prompt " << result.promptTokens << " tokens with " << result.cachedTokens << " reused (" << record.promptSpeed << " tok/s), drafts kept " << result.kept << " of " << result.drafted << ", model " << result.modelMs << " ms of " << result.outputMs << " ms decoding, vram hit " << hit << "%";
     if(result.drafted) std::cout << ", propose " << proposeMs << " ms, verify " << verifyMs << " ms (draft feed " << (brain.gpu->feedMs - feedBefore) << " ms), snapshot " << markMs << " ms, commit " << commitMs << " ms";
     if(result.copied) std::cout << ", copied from the prompt " << result.copyKept << " of " << result.copied;
-    if(brain.gpu && !brain.gpu->gemma){
+    if(brain.gpu && !brain.gpu->gemma && !brain.gpu->hy4){
         unsigned long long probeMemory[3] = {0, 0, 0};
         NvmlLink& probeNv = nvmlLink();
         if(probeNv.ready) probeNv.getMemory(probeNv.device, probeMemory);
@@ -2344,6 +2359,7 @@ void handleClient(SOCKET client) {
         std::string prompt, error;
         ChatOptions counted = chatOptions(chat);
         counted.gemma = brain.gpu && brain.gpu->gemma;
+        counted.hy = brain.gpu && brain.gpu->hy4;
         if(!renderChat(chat["messages"], chat["tools"], counted, prompt, error)){
             replyHttp(client, 400, "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":" + quoteJson(error) + "}}");
             closesocket(client);
@@ -2708,7 +2724,7 @@ void handleClient(SOCKET client) {
         }
         {
             std::lock_guard<std::mutex> held(preparing.lock);
-            out << ",\"architectures\":[\"qwen4exp\",\"qwen35moe\",\"qwen35\",\"gemma4\"]";
+            out << ",\"architectures\":[\"qwen4exp\",\"qwen35moe\",\"qwen35\",\"gemma4\",\"hy_v4_flash\"]";
             out << ",\"prepare\":{\"task\":" << quoteJson(preparing.task) << ",\"done\":" << preparing.done << ",\"total\":" << preparing.total
                 << ",\"problem\":" << quoteJson(preparing.problem) << ",\"note\":" << quoteJson(preparing.note) << "}";
         }

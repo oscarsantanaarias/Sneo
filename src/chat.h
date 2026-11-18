@@ -12,6 +12,7 @@ struct ChatOptions {
     bool effortNotes = true;
     bool keepByDefault = true;
     bool gemma = false;
+    bool hy = false;
 };
 
 struct ToolCall {
@@ -426,7 +427,118 @@ inline bool renderGemma(const Json& messages, const Json& tools, const ChatOptio
     return true;
 }
 
+// las marcas de hy_v4 llevan el mismo sufijo en todas sus etiquetas
+const std::string hyTag = ":6124c78e";
+inline std::string hyStart() { return "<\xEF\xBD\x9Chy_start" + hyTag + "\xEF\xBD\x9C>"; }
+inline std::string hyMiddle() { return "<\xEF\xBD\x9Chy_middle" + hyTag + "\xEF\xBD\x9C>"; }
+inline std::string hyEnd() { return "<\xEF\xBD\x9Chy_end" + hyTag + "\xEF\xBD\x9C>"; }
+inline std::string hyMark(const std::string& name, bool close = false) { return (close ? "</" : "<") + name + hyTag + ">"; }
+
+inline std::string hyTools(const Json& tools) {
+    std::string out = "# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n";
+    bool first = true;
+    for(const Json& tool : tools.items){
+        const Json& t = tool.has("function") ? tool["function"] : tool;
+        if(t["defer_loading"].truthy()) continue;
+        if(!first) out += "\n";
+        first = false;
+        std::string line = "{";
+        bool firstField = true;
+        for(const auto& field : t.fields){
+            if(field.first == "defer_loading" || field.first == "strict") continue;
+            line += (firstField ? "" : ", ") + quoteJson(field.first) + ": " + writeJson(field.second);
+            firstField = false;
+        }
+        out += line + "}";
+    }
+    out += "\n</tools>\n\nFor function call returns, you should first print " + hyMark("tool_calls");
+    out += "\nFor each function call, you should return object like:\n" + hyMark("tool_call") + "{function-name}";
+    out += hyMark("arg_key") + "{arg-key-1}" + hyMark("arg_key", true) + hyMark("arg_value") + "{arg-value-1}" + hyMark("arg_value", true);
+    out += hyMark("arg_key") + "{arg-key-2}" + hyMark("arg_key", true) + hyMark("arg_value") + "{arg-value-2}" + hyMark("arg_value", true);
+    out += "..." + hyMark("tool_call", true) + "\nAt the end of function call returns, you should print " + hyMark("tool_calls", true);
+    return out;
+}
+
+inline bool renderHy(const Json& messages, const Json& tools, const ChatOptions& options, std::string& prompt, std::string& error) {
+    prompt.clear();
+    if(messages.kind != JSON_LIST || messages.items.empty()){
+        error = "No messages provided.";
+        return false;
+    }
+    std::string effort =
+        (options.thinking.has_value() && !*options.thinking) || options.effort == "no_think" ? "no_think" :
+        options.effort == "low" || options.effort == "minimal" ? "low" :
+        options.effort == "xhigh" || options.effort == "max" ? "max" :
+        "high";
+    bool withTools = tools.kind == JSON_LIST && !tools.items.empty();
+    bool keep = options.keepThinking.value_or(withTools);
+    std::string mode = "<\xEF\xBD\x9Creasoning_mode" + hyTag + "\xEF\xBD\x9C>reasoning_effort:" + effort;
+    const std::vector<Json>& list = messages.items;
+    int lastUser = -1;
+    for(size_t i = 0; i < list.size(); i++){
+        if(list[i]["role"].str() == "user") lastUser = (int)i;
+    }
+    if(list[0]["role"].str() != "system"){
+        prompt += hyStart() + "system" + hyMiddle();
+        if(withTools) prompt += hyTools(tools);
+        prompt += mode + hyEnd();
+    }
+    std::vector<std::string> callIds;
+    for(size_t i = 0; i < list.size(); i++){
+        const Json& m = list[i];
+        std::string role = m["role"].str();
+        std::string text;
+        if(role == "tool"){
+            prompt += hyStart() + "tool" + hyMiddle();
+            for(; i < list.size() && list[i]["role"].str() == "tool"; i++){
+                if(!renderContent(list[i]["content"], false, text, error)) return false;
+                prompt += hyMark("tool_response") + text + hyMark("tool_response", true);
+            }
+            i--;
+            prompt += hyEnd();
+            continue;
+        }
+        if(!renderContent(m["content"], role == "system", text, error)) return false;
+        if(role == "system"){
+            prompt += hyStart() + "system" + hyMiddle();
+            if(i == 0){
+                if(withTools) prompt += hyTools(tools) + (text.empty() ? "" : "\n\n");
+                prompt += text + mode;
+            } else prompt += text;
+            prompt += hyEnd();
+        } else if(role == "assistant"){
+            std::string reasoning = m["reasoning"].str(m["reasoning_content"].str());
+            bool show = effort != "no_think" && (keep || (int)i > lastUser) && !reasoning.empty();
+            prompt += hyStart() + "assistant" + hyMiddle() + hyMark("think") + (show ? reasoning : "") + hyMark("think", true) + text;
+            const Json& calls = m["tool_calls"];
+            if(calls.kind == JSON_LIST && !calls.items.empty()){
+                prompt += hyMark("tool_calls");
+                for(const Json& call : calls.items){
+                    const Json& f = call.has("function") ? call["function"] : call;
+                    prompt += hyMark("tool_call") + f["name"].str();
+                    Json args = f["arguments"];
+                    if(args.kind == JSON_TEXT) args = parseJson(args.text);
+                    for(const auto& field : args.fields){
+                        prompt += hyMark("arg_key") + field.first + hyMark("arg_key", true) + hyMark("arg_value") + (field.second.kind == JSON_TEXT ? field.second.text : writeJson(field.second)) + hyMark("arg_value", true);
+                    }
+                    prompt += hyMark("tool_call", true);
+                }
+                prompt += hyMark("tool_calls", true);
+            }
+            prompt += hyEnd();
+        } else {
+            prompt += hyStart() + role + hyMiddle() + text + hyEnd();
+        }
+    }
+    if(options.generation && list.back()["role"].str() != "assistant"){
+        prompt += hyStart() + "assistant" + hyMiddle() + hyMark("think");
+        if(effort == "no_think") prompt += hyMark("think", true);
+    }
+    return true;
+}
+
 inline bool renderChat(const Json& messages, const Json& tools, const ChatOptions& options, std::string& prompt, std::string& error) {
+    if(options.hy) return renderHy(messages, tools, options, prompt, error);
     if(options.gemma) return renderGemma(messages, tools, options, prompt, error);
     prompt.clear();
 

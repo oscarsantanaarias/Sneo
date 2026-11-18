@@ -54,6 +54,8 @@ struct GenerateHooks {
     int verifyLimit = 0;
     int draftLimit = 0;
     int copyLimit = 8;
+    // en modelos donde cada fila de mas cuesta caro solo se copian tramos que ya coinciden bastante
+    int copyLeast = 0;
     int guessStart = 0;
     int contextLimit = 0;
     std::string thinkOpen = "<think>";
@@ -511,6 +513,44 @@ inline Json parseGemmaValue(const std::string& s, size_t& at) {
     return v;
 }
 
+// hy4 manda varias llamadas en un mismo bloque, cada una entre sus marcas de tool_call
+inline std::vector<std::string> splitHyCalls(const std::string& text) {
+    std::string open = hyMark("tool_call"), close = hyMark("tool_call", true);
+    std::vector<std::string> calls;
+    if(text.find(hyMark("arg_key")) == std::string::npos && text.find(open) == std::string::npos) return {text};
+    size_t at = 0;
+    while(true){
+        size_t start = text.find(open, at);
+        if(start == std::string::npos) break;
+        size_t end = text.find(close, start);
+        calls.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end + close.size() - start));
+        if(end == std::string::npos) break;
+        at = end + close.size();
+    }
+    if(calls.empty()) calls.push_back(text);
+    return calls;
+}
+
+// el valor va como texto si la herramienta lo pide asi, si no se lee como json
+inline Json toolValue(const std::string& raw, const std::string& name, const std::string& key, const Json& tools) {
+    std::string value = raw;
+    while(!value.empty() && value.front() == '\n') value.erase(0, 1);
+    while(!value.empty() && value.back() == '\n') value.pop_back();
+    bool asText = true;
+    for(const Json& t : tools.items){
+        const Json& known = t["function"].kind == JSON_OBJECT ? t["function"] : t;
+        if(known["name"].str() != name) continue;
+        const Json& type = known["parameters"]["properties"][key]["type"];
+        asText = type.kind != JSON_TEXT || type.text == "string";
+    }
+    Json parsed = asText ? Json() : parseJson(value);
+    if(asText || (parsed.kind == JSON_NULL && value != "null")){
+        parsed.kind = JSON_TEXT;
+        parsed.text = value;
+    }
+    return parsed;
+}
+
 inline Json parseToolText(const std::string& text, int index, const Json& tools) {
     Json call;
     call.kind = JSON_OBJECT;
@@ -518,7 +558,39 @@ inline Json parseToolText(const std::string& text, int index, const Json& tools)
 
     size_t lead = text.find_first_not_of(" \n\r\t");
     Json direct = parseJson(text);
-    if(lead != std::string::npos && text.compare(lead, 5, "call:") == 0){
+    std::string hyKey = hyMark("arg_key"), hyCall = hyMark("tool_call");
+    if(text.find(hyKey) != std::string::npos || text.find(hyCall) != std::string::npos){
+        // hy4: <tool_call>nombre<arg_key>clave</arg_key><arg_value>valor</arg_value>...</tool_call>
+        std::string keyClose = hyMark("arg_key", true), valueOpen = hyMark("arg_value"), valueClose = hyMark("arg_value", true);
+        size_t start = text.find(hyCall);
+        size_t from = start == std::string::npos ? 0 : start + hyCall.size();
+        size_t end = text.find(hyMark("tool_call", true), from);
+        std::string body = text.substr(from, end == std::string::npos ? std::string::npos : end - from);
+        size_t firstKey = body.find(hyKey);
+        name = body.substr(0, firstKey);
+        size_t trim = name.find_first_not_of(" \n\r\t");
+        name = trim == std::string::npos ? "" : name.substr(trim);
+        Json params;
+        params.kind = JSON_OBJECT;
+        size_t at = firstKey;
+        while(at != std::string::npos){
+            size_t k = body.find(hyKey, at);
+            if(k == std::string::npos) break;
+            size_t kEnd = body.find(keyClose, k);
+            if(kEnd == std::string::npos) break;
+            std::string key = body.substr(k + hyKey.size(), kEnd - k - hyKey.size());
+            while(!key.empty() && isspace((unsigned char)key.back())) key.pop_back();
+            while(!key.empty() && isspace((unsigned char)key.front())) key.erase(0, 1);
+            size_t v = body.find(valueOpen, kEnd);
+            if(v == std::string::npos) break;
+            size_t vEnd = body.find(valueClose, v);
+            std::string value = body.substr(v + valueOpen.size(), vEnd == std::string::npos ? std::string::npos : vEnd - v - valueOpen.size());
+            while(!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
+            params.fields.push_back({key, toolValue(value, name, key, tools)});
+            at = vEnd == std::string::npos ? std::string::npos : vEnd + valueClose.size();
+        }
+        args = writeJson(params);
+    } else if(lead != std::string::npos && text.compare(lead, 5, "call:") == 0){
         size_t open = text.find('{', lead);
         name = text.substr(lead + 5, open == std::string::npos ? std::string::npos : open - lead - 5);
         while(!name.empty() && isspace((unsigned char)name.back())) name.pop_back();
@@ -801,6 +873,7 @@ inline GenerateResult runGenerate(SOCKET client, const GenerateRequest& req, Gen
         bool copied = false;
         if(drafting && quiet == 0){
             std::vector<int> copy = longest > 0 ? index.propose(reach, matched) : std::vector<int>();
+            if(hooks.copyLeast > 0 && matched < hooks.copyLeast) copy.clear();
             std::vector<int> guess = hooks.propose && matched < 12 ? hooks.propose(token, depth) : std::vector<int>();
             copied = !copy.empty() && (matched >= 12 || guess.empty() || (copy.size() > guess.size() && copy[0] == guess[0]));
             draft = copied ? copy : guess;
@@ -901,7 +974,9 @@ inline GenerateResult runGenerate(SOCKET client, const GenerateRequest& req, Gen
     }
 
     result.toolCalls.kind = JSON_LIST;
-    for(size_t i = 0; i < splitter.tools.size(); i++) result.toolCalls.items.push_back(parseToolText(splitter.tools[i], (int)i, req.tools));
+    for(size_t i = 0; i < splitter.tools.size(); i++){
+        for(const std::string& one : splitHyCalls(splitter.tools[i])) result.toolCalls.items.push_back(parseToolText(one, (int)result.toolCalls.items.size(), req.tools));
+    }
     if(!result.toolCalls.items.empty() && result.finish == "stop") result.finish = "tool_calls";
 
     if(result.clientGone) return result;

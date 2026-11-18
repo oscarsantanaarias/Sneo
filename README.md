@@ -37,6 +37,7 @@ Made by Oscar Santana, a developer from the Dominican Republic: [LinkedIn](https
 | Qwen3.5 4B | Dense | 2.5 GB | `qwen3.5:4b` in Ollama |
 | Gemma 4 26B | Mixture of experts | 16 GB | `gemma4:26b` in Ollama, its draft assistant comes along and makes writing faster |
 | Gemma 4 31B | Dense | 17 GB | `gemma4:31b` in Ollama, its draft assistant comes along and makes writing faster |
+| Hy4-flash Q4_K_M (preview) | Tencent, 512 experts, 12B active | 157 GB | [AngelSlim/Hy4-flash-GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF), see [Hy4-flash](#hy4-flash-preview) |
 
 The same models as GGUF files from Hugging Face load too, and so do other quantizations of them, as long as their tensors are of these types: IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q2_0, Q4_K, Q5_K, Q5_1, Q6_K, Q8_0, F16, BF16 and F32 (for example the usual Q4_K_M, Q5_K_M, Q6_K and Q8_0 files).
 
@@ -52,6 +53,16 @@ For Qwen3.8-Flash-Next, bigger files answer better and need more memory. As a gu
 | UD-Q4_K_XL | 104 GB | Best of these, wants 64 GB of RAM or more |
 
 A model split in parts (`-00001-of-00002.gguf`, `-00002-of-00002.gguf`, ...) needs all its parts.
+
+### Hy4-flash (preview)
+
+Tencent's Hy4-flash runs on this branch. It is big: 157 GB at Q4_K_M and 12B active parameters per token, so it wants a 24 GB card and 96 GB of RAM.
+
+- Download both parts of the Q4_K_M from [AngelSlim/Hy4-flash-GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF) into one folder.
+- For faster writing, make a `dfly2` folder next to them and put `model-00148-of-00148.safetensors` from [tencent/Hy4-flash](https://huggingface.co/tencent/Hy4-flash) in it (1.7 GB). That file holds DFly2, the model's own draft layers. Without it Hy4 still runs, only slower.
+- The first load builds the GPU kernels and reads the experts into RAM, about a minute. The experts used most stay on the card and the list is kept in `profiles\Hy4-flash-Q4_K_M.hy4heat`, so it starts warm.
+
+On an RTX 3090 with 96 GB of DDR5 it reads long prompts at 400 to 500 tok/s, writes code at 30 to 37 tok/s and prose at about 25 tok/s after a 10K token prompt. Tool calls work with the coding agent.
 
 ### Where to put them
 

@@ -44,6 +44,7 @@ inline TypeInfo typeInfo(uint32_t type) {
         case 30: return {1, 2, "BF16"};
         case 39: return {32, 17, "MXFP4"};
         case 42: return {64, 18, "Q2_0"};
+        case 43: return {1, 1, "F8_E4M3"};
         default: return {0, 0, "UNKNOWN"};
     }
 }

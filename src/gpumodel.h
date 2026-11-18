@@ -23,6 +23,8 @@ struct GpuMatrix {
 };
 
 #include "gemma4.h"
+#include "hy4.h"
+#include "safetensors.h"
 
 inline std::atomic<bool> stopLoading{false};
 
@@ -292,6 +294,14 @@ struct GpuModel {
     GemmaShape gemmaShape;
     GemmaBuffers gemmaBuffers;
     std::vector<GemmaLayer> gemmaLayers;
+    bool hy4 = false;
+    HyShape hyShape;
+    HyBuffers hyBuffers;
+    std::vector<HyLayer> hyLayers;
+    HyCache hyCache;
+    HyDraft hyDraft;
+    int hyTop = 0;
+    void* hyRouted = nullptr;
     FrontLink* remote = nullptr;
     std::vector<float> frontStack;
     // en el nodo del pool: cada parte de filas lista sale apenas se copia de la tarjeta
@@ -610,7 +620,8 @@ struct GpuModel {
         seer.close();
         vramBudget.close();
         processVram.close();
-        if(ready) saveHeat();
+        if(ready && !hy4) saveHeat();
+        if(ready && hy4) hySaveHeat();
         if(helper.context) closeHelper();
         warmStop = true;
         if(warmer.joinable()) warmer.join();
@@ -626,6 +637,7 @@ struct GpuModel {
             cudaLink().setCurrent(cudaLink().context);
             cudaLink().sync();
             if(blas) blasLink().destroy(blas);
+            if(hyBuffers.blas) blasLink().destroy(hyBuffers.blas);
             blas = nullptr;
             for(uint64_t p : allocations) cudaLink().release(p);
             for(PoolSpan& p : poolSpans) dropPool(p);
@@ -1025,6 +1037,35 @@ struct GpuModel {
     }
 
     bool loadGemma(const std::string& path, int threads);
+    bool loadHy4(const std::string& path, int threads);
+    bool moveHy4(int slot, bool keep);
+    void hySaveHeat();
+    void hyFillRam();
+    void hyFillWarm();
+    void hyOpenHelper(const std::string& source, const std::vector<uint8_t>& blob);
+    bool hyHelperLaunch(HyLayer& L, int n, const std::vector<int>& slots, const std::vector<int>& pairsList);
+    bool hyLoadDraft(const std::string& modelPath);
+    std::vector<int> hyPropose(int token, int most);
+    void hyPack(uint64_t input, int count, int slot);
+    void hyProjectSame(const std::vector<std::pair<const GpuMatrix*, uint64_t>>& list, uint64_t input, int n, bool ready = false);
+    void hyProject(const GpuMatrix& m, uint64_t input, uint64_t output, int n);
+    void hyHcIn(uint64_t streams, uint64_t fn, uint64_t scale, uint64_t base, uint64_t norm, uint64_t out, uint64_t post, int rows, int n, bool pack = false);
+    void hyHcOut(uint64_t x, uint64_t norm, int n);
+    void hyNormRows(uint64_t in, int inStride, uint64_t out, int outStride, uint64_t weight, int weightStride, int rows, int groups, int cols, float eps);
+    void hyEngramHost(const int* positions, int n);
+    void hyExpertsHost(HyLayer& L, int n, const std::vector<char>& onCpu);
+    void hyExperts(int l, int n);
+    void hyUpload(int l, int e, int slot);
+    void hyBatch(HyLayer& L, uint64_t base, const int* slots, const int* pairs, uint64_t slotsOn, uint64_t pairsOn, int count);
+    void hyLayer(int l, int n, int part = 0);
+    void hyAttention(int l, int n);
+    bool hyCopyExpert(int l, int e, uint64_t at);
+    void hyExpertsWide(int l, int n, uint64_t stage);
+    void hyExpertsGrouped(int l, int n, uint64_t stage, const std::vector<std::vector<int>>& byExpert);
+    bool hyWide(const int* ids, const int* positions, int n, bool last);
+    std::vector<std::pair<uint64_t*, uint64_t>> hySubBuffers(int rows);
+    bool hyChunk(const int* ids, const int* positions, int n, bool last);
+    std::vector<float> forwardHy4(const std::vector<int>& ids, const std::vector<int>& positions);
     void gemmaPack(uint64_t input, int count, PackedInput& packed);
     void gemmaExpertRows(const GpuMatrix& m, uint64_t expertBytes, int perToken, uint64_t input, PackedInput& packed, uint64_t output, int slots);
     int gemmaSplits(const GemmaLayer& L, int n, int top);
@@ -1049,6 +1090,7 @@ struct GpuModel {
         keepFullSpeed();
         file = opened;
         if(file.arch == "gemma4") return loadGemma(path, threads);
+        if(file.arch == "hy_v4_flash") return loadHy4(path, threads);
         dense = file.arch == "qwen35";
         if(dense) residual = false;
         if(endLayer <= 0 || endLayer > (int)file.layers) endLayer = (int)file.layers;
@@ -2567,6 +2609,10 @@ struct GpuModel {
             gemmaBuffers.ringTop = -1;
             return;
         }
+        if(hy4){
+            hyBuffers.ringTop = -1;
+            return;
+        }
         if(!ready || !useCuda()) return;
         if(remote) remote->state(STATE_RESET, 0);
         for(int l = firstLayer; l < endLayer; l++){
@@ -3641,6 +3687,7 @@ struct GpuModel {
 
     std::vector<int> draftPropose(int token, int most) {
         if(gemma) return gemmaPropose(token, most);
+        if(hy4) return hyPropose(token, most);
         settleTail();
         std::vector<int> drafts;
         if(!drafting || draftPendingAt < 0 || most <= 0) return drafts;
@@ -3672,6 +3719,17 @@ struct GpuModel {
             tokens.resize(std::min(tokens.size(), savedTokens[1]));
             tokens.insert(tokens.end(), accepted.begin(), accepted.end());
             return gemmaKeep(count);
+        }
+        if(hy4){
+            if(count < 1 || count > hyBuffers.everyCap) return false;
+            tokens.resize(std::min(tokens.size(), savedTokens[1]));
+            tokens.insert(tokens.end(), accepted.begin(), accepted.end());
+            hyDraft.from = hyBuffers.normedRows + 4ULL * (count - 1) * hyShape.hidden;
+            hyDraft.at = (int)tokens.size() - 1;
+            hyDraft.steps++;
+            hyDraft.kept += count - 1;
+            if(count > 1) hyDraft.firstKept++;
+            return true;
         }
         if(!replayStore || replayRows < 2 || count < 1 || count > replayRows || !useCuda()) return false;
         if(settling){
@@ -3724,6 +3782,16 @@ struct GpuModel {
     }
 
     bool settleRows(const std::vector<int>& rows) {
+        if(hy4){
+            if(!rows.empty() && (int)rows.size() <= hyBuffers.everyCap){
+                hyDraft.from = hyBuffers.normedRows + 4ULL * (rows.size() - 1) * hyShape.hidden;
+                hyDraft.at = (int)tokens.size() - 1;
+                hyDraft.steps++;
+                hyDraft.kept += rows.size() - 1;
+                if(rows.size() > 1) hyDraft.firstKept++;
+            }
+            return true;
+        }
         if(gemma){
             if(!rows.empty() && (int)rows.size() <= gemmaBuffers.everyCap) gemmaKeep((int)rows.size());
             return true;
@@ -6365,11 +6433,12 @@ struct GpuModel {
     }
 
     bool canMark(size_t rows) const {
-        return ready && !gemma && !dense && !remote && firstLayer == 0 && streamPrefill && fine && !exact && rows > (size_t)chunk;
+        return ready && !gemma && !hy4 && !dense && !remote && firstLayer == 0 && streamPrefill && fine && !exact && rows > (size_t)chunk;
     }
 
     bool moveState(int slot, bool keep, bool tell = true) {
         if(gemma) return moveGemma(slot, keep);
+        if(hy4) return moveHy4(slot, keep);
         if(!ready || slot < 0 || slot >= 4 || !useCuda()) return false;
         settleTail();
         if(!keep && !snapshots[slot] && !hostSnapshots[slot]) return false;
@@ -6437,6 +6506,7 @@ struct GpuModel {
 
     std::vector<float> forward(const std::vector<int>& ids, const std::vector<int>& positions) {
         if(gemma) return forwardGemma(ids, positions);
+        if(hy4) return forwardHy4(ids, positions);
         settleTail();
         std::vector<float> logits;
         if(!ready || ids.empty() || ids.size() != positions.size()) return logits;
@@ -6662,3 +6732,5 @@ struct GpuModel {
 };
 
 #include "gemma4run.h"
+#include "hy4run.h"
+#include "hy4draft.h"

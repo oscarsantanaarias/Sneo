@@ -2004,6 +2004,11 @@ textarea:focus {
   font-size: 10.5px;
 }
 
+.brain-state.failed {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 .brain-state.warming {
   color: var(--accent-hi);
   border-color: var(--accent-line);

@@ -695,7 +695,9 @@ void loadBrain(std::string path, uint64_t ticket) {
         std::cout << "draft layer: " << (brain.gpu->drafting ? (brain.gpu->tiedDraft ? "built into the model" : "loaded") : brain.gpu->draftProblem.empty() ? "not found" : brain.gpu->draftProblem) << std::endl;
         if(brain.gpu->legacy) std::cout << "gpu: no Ampere tensor cores, prompts run on the dp4a tile kernels" << std::endl;
     }
-    if(brain.gpu && brain.gpu->dense) std::cout << "experts: none, the dense model runs whole on the gpu" << std::endl;
+    if(brain.gpu && brain.gpu->dense) std::cout << (brain.gpu->denseHostBytes
+        ? "experts: none, the dense model runs on the gpu and reads " + std::to_string(brain.gpu->denseHostBytes >> 20) + " MB of its layers from pinned ram"
+        : std::string("experts: none, the dense model runs whole on the gpu")) << std::endl;
     if(brain.gpu && brain.gpu->seeing) std::cout << "vision: the picture reader runs on " << brain.gpu->visionCard << std::endl;
     if(brain.gpu && !brain.gpu->seeing && !brain.gpu->visionProblem.empty()) std::cout << "vision: " << brain.gpu->visionProblem << std::endl;
     if(brain.gpu && !brain.gpu->dense) std::cout << "experts: " << brain.gpu->residentExperts << " per layer in vram, " << brain.gpu->warmPerLayer << " per layer pinned in ram (" << (double)brain.gpu->warmPinnedBytes / gib << " GB), placed by "
@@ -2224,6 +2226,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     uint64_t relayRoutesBefore = brain.gpu ? brain.gpu->relayRoutes : 0, relayKeptBefore = brain.gpu ? brain.gpu->relayKept : 0;
     uint64_t relayCpuBefore = brain.gpu ? brain.gpu->relayCpu : 0, relayWarmBefore = brain.gpu ? brain.gpu->relayWarm : 0;
     double serveWaitBefore = brain.gpu ? brain.gpu->serveWait : 0, serveWorkBefore = brain.gpu ? brain.gpu->serveWork : 0;
+    double denseWorkBefore = brain.gpu ? brain.gpu->denseWork : 0, denseWaitBefore = brain.gpu ? brain.gpu->denseWait : 0;
     uint64_t usedBefore = brain.gpu ? brain.gpu->foreseenUsed : 0;
     double frontBefore = frontLink.roundMs;
     uint64_t roundsBefore = frontLink.rounds;
@@ -2271,6 +2274,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     if(split) std::cout << ", " << frontLink.node << " " << frontLink.roundMs - frontBefore << " ms in " << frontLink.rounds - roundsBefore << " rounds (this pc waited " << brain.gpu->frontMs - waitedBefore << " ms), " << (frontLink.sentBytes - sentBefore) / 1048576.0 << " MB sent and " << (frontLink.gotBytes - gotBefore) / 1048576.0 << " MB back";
     if(brain.gpu) std::cout << ", cpu experts " << brain.gpu->expertMs - expertBefore << " ms, " << brain.gpu->coldExperts - coldBefore << " outside the warm cache, " << brain.gpu->foreseen - foreseenBefore << " read ahead (" << brain.gpu->foreseenUsed - usedBefore << " used)";
     if(brain.gpu && brain.gpu->liftCount > liftedBefore) std::cout << ", " << brain.gpu->liftCount - liftedBefore << " recent experts brought to video memory";
+    if(brain.gpu && brain.gpu->denseHostBytes) std::cout << ", layers in ram: cpu worked " << brain.gpu->denseWork - denseWorkBefore << " ms and waited " << brain.gpu->denseWait - denseWaitBefore << " ms for the gpu";
     if(brain.gpu && brain.gpu->relayRoutes > relayRoutesBefore) std::cout << ", verify passes: " << 100.0 * (double)(brain.gpu->relayKept - relayKeptBefore) / (double)(brain.gpu->relayRoutes - relayRoutesBefore) << "% of routes in vram, " << brain.gpu->relayWarm - relayWarmBefore << " rows from pinned ram, " << brain.gpu->relayCpu - relayCpuBefore << " on the cpu, host waited " << brain.gpu->serveWait - serveWaitBefore << " ms for the gpu and worked " << brain.gpu->serveWork - serveWorkBefore << " ms";
     if(brain.gpu && brain.gpu->helper.rows > helpedBefore) std::cout << ", " << brain.gpu->helper.name << " computed " << brain.gpu->helper.rows - helpedBefore << " expert rows";
     if(brain.gpu && !brain.gpu->helper.ready && !brain.gpu->helper.problem.empty() && helpedBefore > 0) std::cout << ", " << brain.gpu->helper.problem;
@@ -2716,6 +2720,7 @@ void handleClient(SOCKET client) {
             std::lock_guard<std::mutex> guard(engine.lock);
             out << "{\"status\":\"ok\",\"currentModel\":" << quoteJson(engine.loaded ? engine.modelPath : "") << ",\"loaded\":" << (engine.loaded ? "true" : "false")
                 << ",\"ready\":" << (brainState == 2 ? "true" : "false") << ",\"warming\":" << (brainState == 1 ? "true" : "false");
+            if(brainState == -1) out << ",\"problem\":" << quoteJson(brainProblem);
             if(brainState == 1){
                 std::lock_guard<std::mutex> step(loadStatus.lock);
                 out << ",\"load\":{\"step\":" << quoteJson(stopLoading ? std::string("Stopping") : loadStatus.step) << ",\"done\":" << loadStatus.done.load() << ",\"total\":" << loadStatus.total.load() << "}";

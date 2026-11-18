@@ -1250,7 +1250,7 @@ function App(){
   const showEngineFiles = res => {
     const list = Array.isArray(res.models) ? res.models : [];
     const current = res.loaded ? String(res.currentModel || '') : '';
-    setEngineFiles({list, current, reachable: true, ready: !!res.ready, warming: !!res.warming, load: res.load || null, prepare: res.prepare || null, healed: res.healed || null});
+    setEngineFiles({list, current, reachable: true, ready: !!res.ready, warming: !!res.warming, problem: res.problem || '', load: res.load || null, prepare: res.prepare || null, healed: res.healed || null});
     if(res.folder) setModelFolder(res.folder);
     if(current) setSettings(prev => ({...prev, model: current.split(/[\\/]/).pop()}));
     setPickedFile(prev => list.some(item => item.path === prev)
@@ -2567,7 +2567,9 @@ function App(){
           ref={textareaRef}
           value={text}
           placeholder={modelIdle
-            ? engineFiles.current ? tr('Load model first') : tr('Pick a model first')
+            ? engineFiles.problem
+              ? tr('The model did not load: {0}', engineFiles.problem)
+              : engineFiles.current ? tr('Load model first') : tr('Pick a model first')
             : modelLoading
               ? engineFiles.healed && engineFiles.healed.seconds < 180
                 ? tr('Windows moved {0} MB of the model out of video memory, Sneo loads it again to get the speed back...', engineFiles.healed.mb)
@@ -2729,7 +2731,7 @@ function App(){
             </span>
             <span className="brain-effort">{depthLevels.find(item => item.value === thinkDepth)?.label || tr('Normal')}</span>
             {engineFiles.current && !engineFiles.ready && (
-              <span className={engineFiles.warming ? 'brain-state warming' : 'brain-state'}>{engineFiles.warming ? stoppingLoad ? tr('stopping') : loadPercent !== null ? tr('loading {0}%', loadPercent) : tr('loading') : tr('idle')}</span>
+              <span className={engineFiles.warming ? 'brain-state warming' : engineFiles.problem ? 'brain-state failed' : 'brain-state'} title={engineFiles.problem || undefined}>{!engineFiles.warming && engineFiles.problem ? tr('failed') : engineFiles.warming ? stoppingLoad ? tr('stopping') : loadPercent !== null ? tr('loading {0}%', loadPercent) : tr('loading') : tr('idle')}</span>
             )}
             {engineFiles.ready && engineFiles.prepare?.task && <span className="brain-state warming">{tr('preparing')}</span>}
             <i className="fa-solid fa-chevron-up depth-caret"></i>
@@ -2865,7 +2867,9 @@ function App(){
                     ? tr('In memory')
                     : engineFiles.warming
                       ? loadStep
-                      : tr('Not in memory, load it to start')}
+                      : engineFiles.problem
+                        ? tr('The model did not load: {0}', engineFiles.problem)
+                        : tr('Not in memory, load it to start')}
                 </span>
                 {engineFiles.ready && (
                   <button type="button" className="brain-action" disabled={!!fileBusy || loading} onClick={freeEngineMemory}>

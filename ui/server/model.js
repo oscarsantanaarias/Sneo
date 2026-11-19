@@ -1,5 +1,6 @@
 import { runnerUrl, defaultModel } from './config.js';
 import { cleanText, readManualModels, readSettings } from './storage.js';
+import { loopStart } from './loopcut.js';
 
 const effortLevels = {off: 'none', light: 'low', normal: 'medium', deep: 'high', full: 'max'};
 
@@ -27,8 +28,9 @@ export const readEngine = async () => {
       ]);
       seen.model = models.loaded ? cleanText(models.currentModel).split(/[\\/]/).pop() : '';
       seen.context = Number(pool.context) || 0;
-      seen.vision = pool.vision === true;
-      seen.visionProblem = cleanText(pool.visionProblem);
+      // con el modelo listo vale lo que el motor puede leer de verdad: el ajuste prendido no alcanza si ese modelo solo lee texto
+      seen.vision = models.ready === true && typeof pool.visionReady === 'boolean' ? pool.visionReady : pool.vision === true;
+      seen.visionProblem = cleanText(pool.visionProblem) || (pool.vision === true && !seen.vision ? 'the loaded model reads text only, load one that reads pictures' : '');
     } catch(e) {
       seen.model = '';
     }
@@ -36,6 +38,9 @@ export const readEngine = async () => {
   engineSeen = seen;
   return seen;
 };
+
+// por que no se puede mandar una foto ahora, o vacio si el motor la puede leer
+export const blindReason = (seen) => seen.visionProblem || (seen.vision ? '' : 'Vision is off in Settings');
 
 export const contextWindow = async (settings) => {
   const asked = Number(settings.numCtx) || 0;
@@ -83,11 +88,12 @@ const openaiChatRequest = async (currentModel, messages, tools, provider, run, s
   const contextLimit = await contextWindow(settings);
   // lo mismo que la compactacion deja libre para responder: si se pide mas la respuesta pasa el final de la ventana
   const room = Math.min(16384, Math.floor(contextLimit / 4));
+  const wire = () => messages.map(({images, _claude, ...item}) => images?.length
+    ? {...item, content: [{type: 'text', text: String(item.content ?? '')}, ...images.map(url => ({type: 'image_url', image_url: {url}}))]}
+    : item);
   const body = {
     model: currentModel,
-    messages: messages.map(({images, _claude, ...item}) => images?.length
-      ? {...item, content: [{type: 'text', text: String(item.content ?? '')}, ...images.map(url => ({type: 'image_url', image_url: {url}}))]}
-      : item),
+    messages: wire(),
     stream: true,
     stream_options: {include_usage: true}
   };
@@ -129,7 +135,7 @@ const openaiChatRequest = async (currentModel, messages, tools, provider, run, s
   }
 
   const startedAt = Date.now();
-  const req = await fetch(`${provider.baseUrl}/chat/completions`, {
+  const send = () => fetch(`${provider.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -138,9 +144,8 @@ const openaiChatRequest = async (currentModel, messages, tools, provider, run, s
     body: JSON.stringify(body),
     signal: run?.signal
   });
-
-  if(!req.ok){
-    const raw = await req.text().catch(() => '');
+  const whyFailed = async (res) => {
+    const raw = await res.text().catch(() => '');
     let info = null;
 
     try {
@@ -149,8 +154,29 @@ const openaiChatRequest = async (currentModel, messages, tools, provider, run, s
       info = null;
     }
 
-    const reason = info?.error?.message || (typeof info?.error === 'string' ? info.error : '') || info?.message || raw.slice(0, 300);
-    throw new Error(reason || `Provider answered ${req.status}`);
+    return info?.error?.message || (typeof info?.error === 'string' ? info.error : '') || info?.message || raw.slice(0, 300) || `Provider answered ${res.status}`;
+  };
+  let req = await send();
+
+  // una foto que el motor rechaza no tumba el turno: se quita, queda el aviso en su mensaje y el texto sigue
+  if(req.status === 400 && messages.some(item => item.images?.length)){
+    const why = await whyFailed(req);
+
+    for(const item of messages){
+      if(item.images?.length){
+        item.content = `${item.content ?? ''}\n\n[the picture attached here could not be read: ${why}]`;
+        delete item.images;
+      }
+    }
+
+    forgetEngine();
+    body.messages = wire();
+    run?.onEvent?.({type: 'tool', tool: `the picture was not read: ${why}`.slice(0, 160)});
+    req = await send();
+  }
+
+  if(!req.ok){
+    throw new Error(await whyFailed(req));
   }
 
   const call = {content: '', reasoning: '', toolCalls: [], finishReason: null, promptTokens: 0, outputTokens: 0, cachedTokens: 0, thinkMs: 0, writeMs: 0, firstTokenMs: 0, outputSpeed: 0, promptSpeed: 0, contextLimit};
@@ -180,6 +206,7 @@ const openaiChatRequest = async (currentModel, messages, tools, provider, run, s
     let buffer = '';
     let finished = false;
     let toldAt = 0;
+    let checkedAt = 0;
 
     for await (const chunk of req.body){
       buffer += decoder.decode(chunk, {stream: true});
@@ -282,6 +309,20 @@ const openaiChatRequest = async (currentModel, messages, tools, provider, run, s
           call.content += delta.content;
         }
 
+        // un tramo que se repite sin fin se corta aqui: queda una sola copia y el motor para cuando se cierra la conexion
+        if(delta.content && call.content.length - checkedAt >= 400){
+          checkedAt = call.content.length;
+          const cut = loopStart(call.content);
+
+          if(cut >= 0){
+            call.content = call.content.slice(0, cut);
+            call.cut = 'repeating';
+            call.finishReason = 'stop';
+            finished = true;
+            break;
+          }
+        }
+
         for(const part of delta.tool_calls || []){
           const index = Number.isInteger(part.index) ? part.index : call.toolCalls.length;
           const slot = call.toolCalls[index] || (call.toolCalls[index] = {id: '', type: 'function', function: {name: '', arguments: ''}});
@@ -334,7 +375,8 @@ const openaiChatRequest = async (currentModel, messages, tools, provider, run, s
     content: call.content,
     reasoning: call.reasoning,
     tool_calls: call.toolCalls.filter(Boolean).map(({pieces, ...item}, i) => ({...item, id: item.id || `call_${startedAt}_${i}`})),
-    finishReason: call.finishReason
+    finishReason: call.finishReason,
+    cut: call.cut || ''
   };
 };
 
@@ -522,9 +564,8 @@ export const askModel = async (messages, run, modelOverride) => {
 };
 
 export const askVision = async (prompt, imageBase64) => {
-  const seen = await readEngine();
-  if(!seen.vision) throw new Error('Vision is off in Settings');
-  if(seen.visionProblem) throw new Error(seen.visionProblem);
+  const blind = blindReason(await readEngine());
+  if(blind) throw new Error(blind);
   const settings = await readSettings().catch(() => ({}));
   const base = cleanText(settings.providerBaseUrl).replace(/\/+$/, '');
   const req = await fetch(`${base}/chat/completions`, {

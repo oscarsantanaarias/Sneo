@@ -45,6 +45,9 @@ export const getRegisteredProjects = async () => {
 
 export const isAbsolutePath = (value) => /^[a-zA-Z]:[\\/]/.test(value) || value.startsWith('\\\\') || value.startsWith('/');
 
+// el nombre como se compara: sin diferencias de espacios ni de mayusculas
+const plainName = (value) => cleanText(value).replace(/\s+/g, ' ').toLowerCase();
+
 export const getProjectPath = async (project) => {
   const cleanProject = cleanText(project);
 
@@ -57,13 +60,37 @@ export const getProjectPath = async (project) => {
   }
 
   const projects = await getRegisteredProjects();
-  const found = projects.find(item => item.name === cleanProject);
+  const found = projects.find(item => item.name === cleanProject)
+    || projects.find(item => plainName(item.name) === plainName(cleanProject));
 
   if(found){
     return path.resolve(found.path);
   }
 
   return safeJoin(paths.projectsRoot, cleanProject);
+};
+
+// un chat con proyecto trabaja en ese proyecto: el modelo a veces reescribe el nombre con otros espacios o inventa uno
+// y eso abria otra carpeta en projectos en vez de la del chat. solo sale de ahi con otro proyecto que existe o una ruta completa
+export const chatProject = async (asked, active) => {
+  const wanted = cleanText(asked);
+  const own = cleanText(active);
+
+  if(!wanted || !own){
+    return wanted || own;
+  }
+
+  if(plainName(wanted) === plainName(own)){
+    return own;
+  }
+
+  if(isAbsolutePath(wanted)){
+    const home = await getProjectPath(own).catch(() => '');
+    return home && plainName(path.resolve(wanted)) === plainName(home) ? own : wanted;
+  }
+
+  const projects = await getRegisteredProjects();
+  return projects.some(item => item.name === wanted) ? wanted : own;
 };
 
 export const listDir = async (dirPath, deep = 0, base = dirPath) => {

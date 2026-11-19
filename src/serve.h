@@ -750,8 +750,11 @@ inline GenerateResult runGenerate(SOCKET client, const GenerateRequest& req, Gen
     splitter.thinkClose = hooks.thinkClose;
     splitter.toolOpen = hooks.toolOpen;
     splitter.toolClose = hooks.toolClose;
-    std::string opening = hooks.thinkOpen + "\n";
-    splitter.inThink = prompt.size() >= opening.size() && prompt.compare(prompt.size() - opening.size(), opening.size(), opening) == 0;
+    // qwen deja el prompt en <think> y un salto de linea; hy4 en <think:tag> sin salto: los dos empiezan pensando
+    // sin esto lo que hy4 pensaba salia como respuesta, se guardaba en el chat y no corrian ni el corte de bucles ni el limite de pensamiento
+    std::string opening = hooks.thinkOpen;
+    auto endsWith = [&](const std::string& tail){ return prompt.size() >= tail.size() && prompt.compare(prompt.size() - tail.size(), tail.size(), tail) == 0; };
+    splitter.inThink = endsWith(opening + "\n") || (!opening.empty() && opening.back() == '>' && endsWith(opening));
     std::vector<int> recent;
     DraftIndex index;
     index.addAll(tokens);

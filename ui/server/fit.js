@@ -55,6 +55,61 @@ export const clipText = (text, limit) => {
   return `${source.slice(0, head)}\n\n[output cut: ${source.length} characters in total, ${source.length - head - tail} were left out of the middle. Ask for a narrower range or query to see more]\n\n${source.slice(-tail)}`;
 };
 
+// el razonamiento del modelo no es parte de lo que dijo: fuera los bloques de pensar, con o sin etiqueta, y lo que quedo antes de un cierre suelto
+export const withoutThinking = (text) => {
+  let out = String(text ?? '').replace(/<think(?::[\w-]+)?>[\s\S]*?<\/think(?::[\w-]+)?>/gi, '');
+  const stray = [...out.matchAll(/<\/think(?::[\w-]+)?>/gi)].pop();
+
+  if(stray){
+    out = out.slice(stray.index + stray[0].length);
+  }
+
+  return out.replace(/<think(?::[\w-]+)?>[\s\S]*$/i, '').trim();
+};
+
+const recordHeader = "WHAT EACH TOOL CALL REALLY RETURNED (from the app's log, it wins over anything written above):";
+
+// lo que paso con cada herramienta sale del registro de la app y no de como lo cuente el modelo: un resumen llego a inventar errores que nunca hubo
+const toolRecord = (region) => {
+  const results = new Map(region.filter(item => item.role === 'tool').map(item => [item.tool_call_id, String(item.content ?? '')]));
+  const rows = [];
+
+  for(const item of region){
+    const text = String(item.content ?? '');
+    const at = text.indexOf(recordHeader);
+
+    if(at >= 0){
+      for(const line of text.slice(at + recordHeader.length).split('\n').slice(1)){
+        if(!line.startsWith('- ')){
+          break;
+        }
+
+        rows.push(line);
+      }
+    }
+
+    for(const call of item.tool_calls || []){
+      const result = results.get(call.id);
+
+      if(result === undefined){
+        continue;
+      }
+
+      const failed = result.match(/^\s*\{"error":"((?:[^"\\]|\\.){0,200})/);
+      const args = String(call.function?.arguments || '');
+      const what = (args.match(/"(?:file|target|folder|command|pattern|query|url)"\s*:\s*"((?:[^"\\]|\\.){0,120})/) || [])[1] || '';
+      const outcome = failed
+        ? `failed, ${failed[1]}`
+        : /"action":"no-change"/.test(result.slice(0, 300))
+          ? 'ran but changed nothing'
+          : 'ok';
+      rows.push(`- ${call.function?.name}${what ? ` ${what}` : ''}: ${outcome}`);
+    }
+  }
+
+  return rows.slice(-40).join('\n');
+};
+
 const describe = (item) => {
   const calls = (item.tool_calls || []).map(call => `${call.function?.name}(${String(call.function?.arguments || '').slice(0, 400)})`).join(', ');
 
@@ -62,7 +117,7 @@ const describe = (item) => {
     return `TOOL RESULT: ${clipText(item.content, 1500)}`;
   }
 
-  return `${String(item.role).toUpperCase()}: ${clipText(item.content, 4000)}${calls ? `\nCALLED: ${calls}` : ''}`;
+  return `${String(item.role).toUpperCase()}: ${clipText(item.role === 'assistant' ? withoutThinking(item.content) : item.content, 4000)}${calls ? `\nCALLED: ${calls}` : ''}`;
 };
 
 const plainSummary = (region) => {
@@ -149,7 +204,7 @@ export const fitMessages = async ({messages, tools = null, window, ratio = defau
     for(let at = 0; at < transcript.length; at += piece){
       const chunk = transcript.slice(at, at + piece);
       const text = summary ? `Summary so far:\n${summary}\n\nContinue the summary with this part:\n${chunk}` : chunk;
-      summary = String(summarize ? await summarize(text) : '').trim() || summary;
+      summary = withoutThinking(summarize ? await summarize(text) : '') || summary;
     }
   } catch(e) {
     if(e?.name === 'AbortError'){
@@ -161,6 +216,12 @@ export const fitMessages = async ({messages, tools = null, window, ratio = defau
 
   if(!summary){
     summary = plainSummary(region);
+  }
+
+  const record = toolRecord(region);
+
+  if(record){
+    summary = `${summary}\n\n${recordHeader}\n${record}`;
   }
 
   const placed = placeSummary([messages[0], ...messages.slice(cut)], summary, pinned, region);

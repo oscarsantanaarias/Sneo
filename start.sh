@@ -26,10 +26,14 @@ fi
 
 # el motor se recompila si el codigo es mas nuevo que el programa
 if [ ! -x master ] || [ ! -x worker ] || [ -n "$(find master.cpp worker.cpp src -newer master -type f -print -quit)" ]; then
-    for pid in $(pgrep -x master); do
-        [ "$(readlink -f /proc/$pid/exe 2>/dev/null)" = "$root/master" ] && kill -9 "$pid"
-    done
-    sh build.sh || { echo "The engine could not be built."; exit 1; }
+    if [ -x master ] && [ -x worker ] && ! command -v g++ >/dev/null 2>&1; then
+        echo "The engine code is newer than the engine but g++ is not installed, keeping the current engine."
+    else
+        for pid in $(pgrep -x master); do
+            [ "$(readlink -f /proc/$pid/exe 2>/dev/null)" = "$root/master" ] && kill -9 "$pid"
+        done
+        sh build.sh || { echo "The engine could not be built. On Ubuntu install the compiler with: sudo apt install build-essential"; exit 1; }
+    fi
 fi
 
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }

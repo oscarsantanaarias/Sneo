@@ -117,6 +117,17 @@ Opening Sneo does not load anything into RAM or VRAM. The model loads with the f
 - **Pool worker on another PC:** open Sneo there and join the pool from the Pool view; it starts the worker and opens the firewall by itself.
 - **Build the engine:** `build.bat` (Visual Studio 2026, C++17). The GPU kernels are compiled at first start with NVRTC.
 
+### Linux (preview)
+
+This branch runs on Linux too, with an NVIDIA card.
+
+- **Download:** the Linux release has the engine and its tools already built, for Ubuntu 22.04 or newer (any distro with glibc 2.35 or newer). Unpack it and run `./start.sh`. The first start gets the UI packages, NVRTC and cuBLAS, then opens Sneo in the browser.
+- **From the source:** `./start.sh`, or `./build.sh` for the engine only. It needs g++ 11 or newer, Node.js with npm, curl, python3 with pip (to get NVRTC and cuBLAS once) and the ICU library. On Ubuntu: `sudo apt install build-essential nodejs npm curl python3-pip libicu-dev`. The NVIDIA driver brings libcuda.
+- **Engine only:** `./master 8000 - - modelos`.
+- Measured with Qwen3.6-35B-A3B Q4_K_XL on an RTX 3090 inside WSL 2 (Ubuntu 26.04): 134 to 146 tok/s writing code, with the same answer word for word as on Windows, where the same code writes 146 to 149 tok/s. Not measured yet on Linux installed on the PC itself.
+- On WSL keep the Ubuntu window open while Sneo runs. If WSL shuts the distro down under a running engine, its GPU driver can hang until `wsl --shutdown`.
+- Not there yet: the desktop app (Sneo opens in the browser), AMD cards, reading pictures, the Train view and the pool firewall setup. File pickers use zenity.
+
 ### Using it from other apps
 
 The engine listens on `http://127.0.0.1:8000` (this PC only) and speaks two APIs:

@@ -1553,7 +1553,7 @@ std::vector<FoundModel> scanModels(const std::string& folder) {
     char where[MAX_PATH] = {};
     fs::path store = GetEnvironmentVariableA("OLLAMA_MODELS", where, sizeof(where)) > 0
         ? fs::path(where)
-        : GetEnvironmentVariableA("USERPROFILE", where, sizeof(where)) > 0
+        : GetEnvironmentVariableA("USERPROFILE", where, sizeof(where)) > 0 || GetEnvironmentVariableA("HOME", where, sizeof(where)) > 0
             ? fs::path(where) / ".ollama" / "models"
             : fs::path();
     fs::path manifests = store / "manifests";

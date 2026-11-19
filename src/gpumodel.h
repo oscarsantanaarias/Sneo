@@ -1170,6 +1170,13 @@ struct GpuModel {
             }
         }
         legacy = legacy || cudaLink().major < 8;
+#ifndef _WIN32
+        // wsl deja fijar poco mas de 1 GB de ram para la tarjeta: los anillos que suben expertos al leer el prompt van con dos lados
+        if(access("/dev/dxg", F_OK) == 0){
+            stageSlots = std::min(stageSlots, 16);
+            stageSides = 2;
+        }
+#endif
         if(legacy){
             warmShare = std::min(warmShare, 2);
             chunk = 512;
@@ -1981,6 +1988,24 @@ struct GpuModel {
             return budget > usage + sharedMargin ? budget - usage - sharedMargin : 0;
         };
         pinnedRoom = std::min<uint64_t>(pinnedRoom, sharedRoom());
+#ifndef _WIN32
+        // wsl deja fijar poco mas de 1 GB de ram para la tarjeta aunque haya mucha mas libre y sin presupuesto que lo diga:
+        // se mide lo que queda y 512 MB se guardan para los buffers que se fijan despues, el resto de los expertos lo hace la cpu
+        if(pinWarm && access("/dev/dxg", F_OK) == 0){
+            std::vector<void*> taken;
+            uint64_t got = 0;
+            const uint64_t piece = 64ULL << 20;
+            while(got < pinnedRoom + (512ULL << 20)){
+                void* p = nullptr;
+                if(cudaLink().hostAlloc(&p, (size_t)piece, 0) != 0) break;
+                taken.push_back(p);
+                got += piece;
+            }
+            for(void* p : taken) cudaLink().hostFree(p);
+            pinnedRoom = std::min<uint64_t>(pinnedRoom, got > (512ULL << 20) ? got - (512ULL << 20) : 0);
+            std::cout << "wsl lets the card pin " << (got >> 20) << " MB of ram, " << (pinnedRoom >> 20) << " MB of it for experts" << std::endl;
+        }
+#endif
         warmPerLayer = pinWarm
             ? (int)std::min<uint64_t>(expertCount - planned, pinnedRoom / perExpert)
             : 0;

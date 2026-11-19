@@ -682,7 +682,7 @@ export const diffRows = (before, after, context = 3, most = 300) => {
   return shown;
 };
 
-const missingText = (file) => `The search text was not found in ${file}. Read the file again (read_file or read_range) and copy the exact lines to change, indentation included, then retry. To rewrite the whole file use write_file.`;
+const missingText = (file) => `The search text was not found in ${file}. Read the file again (read_file or read_range) and copy only the few exact lines that change, indentation included, then retry: a short search matches, a big block copied from memory does not. To rewrite the whole file use write_file.`;
 
 export const toolReplaceInFile = async ({project, file, search, replace, all}) => {
   const projectPath = await getProjectPath(project);

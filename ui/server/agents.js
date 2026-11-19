@@ -2,7 +2,7 @@ import path from 'path';
 import { readdir, readFile } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
 import { paths } from './config.js';
-import { askModel, askModelChat, contextWindow, readEngine } from './model.js';
+import { askModel, askModelChat, blindReason, contextWindow, readEngine } from './model.js';
 import { askRoute, readRoutes, routeLabel } from './teams.js';
 import { askInSession, chatSession } from './claudecode.js';
 import { cleanText, makeId, pushAgentLog, readSettings } from './storage.js';
@@ -10,11 +10,11 @@ import { checkTool, runSubTool, runTool, toolQueueWrite } from './tools.js';
 import { runStore, stopChildren } from './runs.js';
 import { normalizeMode, toolKind } from './gate.js';
 import { LoopWatch, silentNote } from './watch.js';
-import { calibrateRatio, clipText, countChars, defaultRatio, estimateTokens, fitMessages, outputLimit, placeSummary } from './fit.js';
+import { calibrateRatio, clipText, countChars, defaultRatio, estimateTokens, fitMessages, outputLimit, placeSummary, withoutThinking } from './fit.js';
 import { subAgentToolSchemas, toolSchemas } from './toolSchemas.js';
 import { memoryList } from './memory.js';
 import { ensurePluginsLoaded, getPluginTools, isPluginTool, runPluginTool, reloadPlugins, listPlugins } from './plugins.js';
-import { getProjectPath } from './projects.js';
+import { chatProject, getProjectPath } from './projects.js';
 import { resolveCall, unknownTool, writesFiles } from './toolAliases.js';
 
 const dispatchTool = async (name, callArgs, run) => {
@@ -66,6 +66,17 @@ const parseNativeArgs = (rawArgs) => {
     return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
   } catch(e) {
     return null;
+  }
+};
+
+// la carpeta de una llamada es la del chat, salvo que el modelo pida a proposito otro proyecto que existe
+const placeCall = async (name, callArgs, project) => {
+  const home = isPluginTool(name)
+    ? callArgs.project || project
+    : await chatProject(callArgs.project, project);
+
+  if(home){
+    callArgs.project = home;
   }
 };
 
@@ -591,9 +602,7 @@ Deliver clear findings, risks and the next step.
         const toolName = resolved.name || asked;
         const callArgs = normalizeToolArgs(toolName, resolved.args || {}, null);
 
-        if(!callArgs.project && project){
-          callArgs.project = project;
-        }
+        await placeCall(toolName, callArgs, project);
 
         let result;
         const toolStart = Date.now();
@@ -642,9 +651,7 @@ Deliver clear findings, risks and the next step.
 
     const callArgs = {...(call.args || {})};
 
-    if(!callArgs.project && project){
-      callArgs.project = project;
-    }
+    await placeCall(call.tool, callArgs, project);
 
     let result;
     const toolStart = Date.now();
@@ -1012,12 +1019,12 @@ export const getAgentAnswer = async (options = {}) => {
   const pictures = [];
 
   if(image){
-    const seen = await readEngine();
-    if(seen.vision && !seen.visionProblem){
+    const blind = blindReason(await readEngine());
+    if(!blind){
       pictures.push(`data:image/png;base64,${image}`);
       effectiveMessage = message || '(the user sent a picture with no text)';
     } else {
-      effectiveMessage = `${message || ''}\n\n[the user attached a picture but it could not be read: ${seen.visionProblem || 'Vision is off in Settings'}]`;
+      effectiveMessage = `${message || ''}\n\n[the user attached a picture but it could not be read: ${blind}]`;
     }
   }
 
@@ -1237,7 +1244,8 @@ Do not delete files unless the user clearly asks.
       return;
     }
 
-    const entry = {role: item.role, content: item.content};
+    // un chat viejo puede traer razonamiento guardado como respuesta: al modelo vuelve solo lo que contesto
+    const entry = {role: item.role, content: item.role === 'assistant' ? withoutThinking(item.content) || item.content : item.content};
     origin.set(entry, firstKept + offset);
     past.push(entry);
   });
@@ -1278,7 +1286,7 @@ Do not delete files unless the user clearly asks.
       ratio,
       pinned: currentUser,
       summarize: text => askModel([
-        {role: 'system', content: 'You condense the older part of a conversation between a user and a coding agent so the agent can keep working without it. Write a compact summary with: what the user asked and decided, the files and paths involved, the commands run and their results, errors still open, and what was about to happen next. Keep paths, names, numbers and error text exactly as written. No preamble.'},
+        {role: 'system', content: 'You condense the older part of a conversation between a user and a coding agent so the agent can keep working without it. Write a compact summary with: what the user asked and decided, the files and paths involved, the commands run and their results, errors still open, and what was about to happen next. Keep paths, names, numbers and error text exactly as written. Say a tool failed only when its TOOL RESULT shows an error, never guess one. No reasoning of your own, no preamble.'},
         {role: 'user', content: text}
       ], {signal: run.signal, thinkDepth: 'off'})
     });
@@ -1488,9 +1496,7 @@ Do not delete files unless the user clearly asks.
       const name = part.name || asked;
       const callArgs = normalizeToolArgs(name, part.args || {}, projectRoot);
 
-      if(!callArgs.project && project){
-        callArgs.project = project;
-      }
+      await placeCall(name, callArgs, project);
 
       const own = preset
         || (part.error ? {error: part.error, hint: part.hint} : null)
@@ -1551,6 +1557,8 @@ Do not delete files unless the user clearly asks.
   let toolIntentRetries = 0;
   let brokenRetries = 0;
   let lengthRetries = 0;
+  let loopRetries = 0;
+  const loopNudge = 'Your last reply got stuck writing the same text again and again, so it was cut. Do not write it again. Decide the next concrete step and do it now with a tool call; if nothing is left to do, answer in a few lines.';
   const lengthNudge = 'Your last reply was cut at the output limit while writing a file, so that write did not complete. Check what is on disk now (read_range or read_file of that file), then continue in smaller pieces: at most 150 lines per call. Write the first part with write_file and extend it with replace_in_file (search the last lines already written, replace them with those lines plus the next part). Do not resend the whole file at once.';
   const selectedReverseTool = ['ghidra', 'ida'].includes(reverseTool) ? reverseTool : 'auto';
   const directGhidraCall = selectedReverseTool === 'ida' ? null : parseDirectGhidraRequest(message);
@@ -1656,11 +1664,11 @@ Do not delete files unless the user clearly asks.
     if(control?.steer?.length){
       const steers = control.steer.splice(0).map(item => typeof item === 'string' ? {text: item, image: ''} : item);
       // una foto mandada mientras trabaja entra como la del primer mensaje: si el motor ve imagenes va adjunta y si no se avisa
-      const sight = steers.some(item => item.image) ? await readEngine() : null;
-      const seeing = Boolean(sight?.vision && !sight?.visionProblem);
+      const blind = steers.some(item => item.image) ? blindReason(await readEngine()) : '';
+      const seeing = !blind;
 
       for(const item of steers){
-        const unread = item.image && !seeing ? `\n[the user attached a picture but it could not be read: ${sight?.visionProblem || 'Vision is off in Settings'}]` : '';
+        const unread = item.image && !seeing ? `\n[the user attached a picture but it could not be read: ${blind}]` : '';
         messages.push({
           role: 'user',
           content: `[NEW MESSAGE FROM THE USER, while you work - take it into account now]: ${item.text || '(a picture with no text)'}${unread}`,
@@ -1732,7 +1740,8 @@ Do not delete files unless the user clearly asks.
       thoughts.push(reply.reasoning.trim());
     }
 
-    const replyText = reply.content || '';
+    // las marcas de pensar con etiqueta de un modelo se leen como las comunes
+    const replyText = String(reply.content || '').replace(/<(\/?)think:[\w-]+>/gi, '<$1think>');
     const closeAt = replyText.indexOf('</think>');
     const rawAnswer = closeAt >= 0 && !/<think>/i.test(replyText.slice(0, closeAt)) ? `<think>${replyText}` : replyText;
     const thinkMatches = [...rawAnswer.matchAll(/<think>([\s\S]*?)(?:<\/think>|$)/gi)];
@@ -1753,6 +1762,18 @@ Do not delete files unless the user clearly asks.
 
     if(planVerdict?.stop){
       return endRun(`${answer}\n\n${planVerdict.note}`, {guard: planVerdict.stop});
+    }
+
+    if(reply.cut === 'repeating' && !nativeCalls.length){
+      if(loopRetries < 1){
+        loopRetries++;
+        onEvent?.({type: 'tool', tool: 'the reply got stuck repeating itself, asking again'});
+        messages.push({role: 'assistant', content: answer});
+        messages.push({role: 'user', content: loopNudge});
+        continue;
+      }
+
+      return endRun(`${answer}\n\n_(cut here: the reply kept repeating the same text)_`);
     }
 
     if(nativeCalls.length){

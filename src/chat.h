@@ -467,7 +467,6 @@ inline bool renderHy(const Json& messages, const Json& tools, const ChatOptions&
     }
     std::string effort =
         (options.thinking.has_value() && !*options.thinking) || options.effort == "no_think" ? "no_think" :
-        options.effort == "low" || options.effort == "minimal" ? "low" :
         options.effort == "xhigh" || options.effort == "max" ? "max" :
         "high";
     bool withTools = tools.kind == JSON_LIST && !tools.items.empty();

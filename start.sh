@@ -35,13 +35,14 @@ fi
 listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
 
 if ! listening 8000; then
-    nohup ./master 8000 - - modelos > master.log 2> master.log.err &
+    nohup ./master 8000 - - modelos > master.log 2> master.log.err < /dev/null &
 fi
 
 sneo_up() { curl -s --max-time 2 http://127.0.0.1:3001/api/sneo 2>/dev/null | grep -q '"sneo":true'; }
 
+# exec deja solo a node con la salida en su archivo, asi la terminal no queda esperando
 if ! sneo_up; then
-    (cd ui && nohup node server/server.js > server.log 2> server.log.err &)
+    (cd ui && exec nohup node server/server.js > server.log 2> server.log.err < /dev/null) &
 fi
 
 for i in $(seq 1 30); do
@@ -50,5 +51,7 @@ for i in $(seq 1 30); do
 done
 
 echo "Sneo is on http://127.0.0.1:3001"
-command -v xdg-open >/dev/null 2>&1 && xdg-open http://127.0.0.1:3001 >/dev/null 2>&1 &
+if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open http://127.0.0.1:3001 >/dev/null 2>&1 < /dev/null &
+fi
 exit 0

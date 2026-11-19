@@ -7,7 +7,7 @@ if ! command -v g++ >/dev/null 2>&1; then
     exit 1
 fi
 mkdir -p build
-flags="-std=c++17 -O2 -mavx2 -mfma -mf16c -pthread -w"
+flags="-std=c++17 -O2 -mavx2 -mfma -mf16c -pthread -w -static-libstdc++ -static-libgcc"
 
 echo "Building the engine tools..."
 for t in fetchdraft draftbuild repack; do

@@ -306,8 +306,14 @@ void preparingEnd(const std::string& problem, const std::string& note) {
 }
 
 bool runTool(const std::string& tool, const std::string& arg, const std::function<void(const std::string&)>& each) {
+#ifdef _WIN32
     std::string exe = (fs::path(runtimeFolder()).parent_path() / "tools" / tool).string();
     std::string command = "\"\"" + exe + "\" \"" + arg + "\" 2>&1\"";
+#else
+    // en linux las herramientas no llevan .exe y sh no necesita las comillas de afuera que pide cmd
+    std::string exe = (fs::path(runtimeFolder()).parent_path() / "tools" / fs::path(tool).stem()).string();
+    std::string command = "\"" + exe + "\" \"" + arg + "\" 2>&1";
+#endif
     FILE* pipe = _popen(command.c_str(), "r");
     if(!pipe) return false;
     char line[1024];

@@ -12,6 +12,7 @@ flags="-std=c++17 -O2 -mavx2 -mfma -mf16c -pthread -w -static-libstdc++ -static-
 echo "Building the engine tools..."
 for t in fetchdraft draftbuild repack; do
     g++ $flags "tools/$t.cpp" -o "build/$t" -ldl
+    cp -f "build/$t" "tools/$t"
 done
 
 echo "Building the engine..."

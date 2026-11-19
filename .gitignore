@@ -40,3 +40,6 @@ train/runs/
 train/sources/
 /master
 /worker
+/tools/fetchdraft
+/tools/draftbuild
+/tools/repack

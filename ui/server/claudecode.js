@@ -28,14 +28,14 @@ const findClaude = () => {
   ];
 
   for(const dir of String(process.env.PATH || '').split(path.delimiter)){
-    if(dir) places.push(path.join(dir, 'claude.exe'));
+    if(dir) places.push(path.join(dir, process.platform === 'win32' ? 'claude.exe' : 'claude'));
   }
 
   const extensions = path.join(home, '.vscode', 'extensions');
   if(fs.existsSync(extensions)){
     const list = fs.readdirSync(extensions).filter(name => name.startsWith('anthropic.claude-code')).sort().reverse();
     for(const name of list){
-      places.push(path.join(extensions, name, 'resources', 'native-binary', 'claude.exe'));
+      places.push(path.join(extensions, name, 'resources', 'native-binary', process.platform === 'win32' ? 'claude.exe' : 'claude'));
     }
   }
 

@@ -120,7 +120,7 @@ typedef int (*NvmlName)(void*, char*, unsigned int);
 typedef int (*NvmlMemory)(void*, unsigned long long*);
 typedef int (*NvmlValue)(void*, unsigned int*);
 typedef int (*NvmlPick)(void*, int, unsigned int*);
-typedef int (*NvmlEnergy)(void*, unsigned long long*);
+typedef int (*NvmlEnergy)(void*, uint64_t*);
 typedef int (*NvmlByBus)(const char*, void**);
 
 struct NvmlLink {

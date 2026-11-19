@@ -387,7 +387,11 @@ inline std::string runtimeFolder() {
     std::filesystem::path dir = home;
     for(int up = 0; up < 5; up++){
         std::error_code code;
+#ifdef _WIN32
         if(std::filesystem::exists(dir / "runtime" / "nvrtc64_120_0.dll", code)) return (dir / "runtime").string();
+#else
+        if(std::filesystem::exists(dir / "runtime" / "libnvrtc.so.12", code)) return (dir / "runtime").string();
+#endif
         if(dir == dir.parent_path()) break;
         dir = dir.parent_path();
     }
@@ -456,7 +460,11 @@ inline std::string compileCode(const std::string& source, const std::string& arc
     SetDllDirectoryA(folder.c_str());
     HMODULE lib = LoadLibraryA((folder + "\\nvrtc64_120_0.dll").c_str());
     if(!lib){
+#ifdef _WIN32
         log = "nvrtc64_120_0.dll missing in " + folder + ", run tools\\get_runtime.bat";
+#else
+        log = "libnvrtc.so.12 missing in " + folder + ", run tools/get_runtime.sh";
+#endif
         return "";
     }
 

@@ -636,6 +636,19 @@ inline int strcpy_s(char* out, size_t size, const char* in) {
     snprintf(out, size, "%s", in ? in : "");
     return 0;
 }
+// las formas de windows que toman el tamano del arreglo solas y la que corta el texto si no entra
+template<size_t N> inline int strcpy_s(char (&out)[N], const char* in) { return strcpy_s(out, N, in); }
+#define _TRUNCATE ((size_t)-1)
+inline int strncpy_s(char* out, size_t size, const char* in, size_t count) {
+    if(!out || !size) return EINVAL;
+    size_t most = count == _TRUNCATE ? size - 1 : std::min(count, size - 1);
+    size_t length = in ? strnlen(in, most) : 0;
+    if(length) memcpy(out, in, length);
+    out[length] = 0;
+    return 0;
+}
+template<size_t N> inline int strncpy_s(char (&out)[N], const char* in, size_t count) { return strncpy_s(out, N, in, count); }
+#define sscanf_s sscanf
 #define _fseeki64 fseeko
 #define _ftelli64 ftello
 // xgetbv sin pedir la opcion xsave a gcc

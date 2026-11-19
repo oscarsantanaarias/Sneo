@@ -6,6 +6,9 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#ifndef _WIN32
+#include "platform.h"
+#endif
 
 struct TypeInfo {
     uint32_t blockElements;

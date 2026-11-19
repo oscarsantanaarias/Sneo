@@ -20,6 +20,7 @@ import { answerApproval, approveRun, queueFor, runStore, stopChildren } from './
 import { pickFiles, pickFolder } from './picker.js';
 import { accessModes, normalizeMode } from './gate.js';
 import { toolCreateFolder, toolDeletePath, toolGrepFiles, toolListFiles, toolListProjects, toolProposePatch, toolReadFile, toolRenamePath, toolSandboxRun, toolWriteFile } from './tools.js';
+import { programPath, stopProgram } from './system.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -158,15 +159,14 @@ router.post('/engine/restart', async (req, res) => {
     await saveSettings({ ...settings, vramReserveGb, ramReserveGb, ssdMaxGb });
 
     const motorRoot = path.resolve(paths.appRoot, '..');
-    const masterExe = path.join(motorRoot, 'master.exe');
+    const masterExe = programPath(motorRoot, 'master');
 
     if(!await pathExists(masterExe)){
-      return res.status(404).json({ message: 'master.exe not found, build the engine first.' });
+      return res.status(404).json({ message: 'The engine was not found, build it first.' });
     }
 
-    await new Promise(r => {
-      execFile('powershell', ['-NoProfile', '-Command', `Get-Process master -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '${masterExe}' } | Stop-Process -Force`], () => setTimeout(r, 1000));
-    });
+    await stopProgram(masterExe);
+    await new Promise(r => setTimeout(r, 1000));
 
     const child = spawn(masterExe, ['8000', '127.0.0.1', '9090', 'modelos'], {
       cwd: motorRoot,

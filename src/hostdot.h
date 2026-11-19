@@ -275,7 +275,7 @@ inline __m256i byteDots(__m256i mag, __m256i x) {
     // gcc pide la opcion avxvnni para todo el archivo y con ella podria usarla en cualquier lado: la instruccion va escrita a mano
     if constexpr(VNNI){
         __m256i sum = _mm256_setzero_si256();
-        __asm__("{vex} vpdpbusd %2, %1, %0" : "+x"(sum) : "x"(mag), "x"(x));
+        __asm__("%{vex%} vpdpbusd %2, %1, %0" : "+x"(sum) : "x"(mag), "x"(x));
         return sum;
     }
 #else

@@ -38,3 +38,5 @@ train/venv/
 train/data/
 train/runs/
 train/sources/
+/master
+/worker

@@ -6,6 +6,7 @@ import { paths } from './config.js';
 import { cleanText, makeId, readSettings } from './storage.js';
 import { askModel } from './model.js';
 import { toolWebSearch, toolWebFetch } from './websearch.js';
+import { onWindows } from './system.js';
 
 const jsonPath = (file) => path.join(paths.dataDir, file);
 
@@ -113,6 +114,14 @@ export const toolSpeak = async ({text}) => {
 
   if(!clean){
     throw new Error('text requerido');
+  }
+
+  if(!onWindows){
+    return await new Promise((resolve) => {
+      const child = spawn('spd-say', ['-w', clean.slice(0, 2000)]);
+      child.on('close', (code) => resolve({spoken: true, engine: 'speech-dispatcher', ok: code === 0}));
+      child.on('error', (e) => resolve({error: `TTS fallo: ${e.message}`}));
+    });
   }
 
   return await new Promise((resolve) => {

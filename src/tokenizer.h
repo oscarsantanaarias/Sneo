@@ -6,6 +6,7 @@
 #define NOMINMAX
 #endif
 #include "platform.h"
+#include <filesystem>
 #include "gguf.h"
 #include "json.h"
 #include <string>
@@ -214,6 +215,7 @@ struct Tokenizer {
             return false;
         }
 
+#ifdef _WIN32
         HMODULE icu = LoadLibraryA("icu.dll");
         if(!icu) icu = LoadLibraryA("icuuc.dll");
         auto charType = icu ? (int8_t(*)(int32_t))GetProcAddress(icu, "u_charType") : nullptr;
@@ -221,6 +223,28 @@ struct Tokenizer {
             error = "icu.dll is missing, unicode classes are not available";
             return false;
         }
+#else
+        // en linux la icu lleva su version en el archivo y en cada funcion: libicuuc.so.78 tiene u_charType_78
+        int8_t (*charType)(int32_t) = nullptr;
+        for(const char* folder : {"/usr/lib/x86_64-linux-gnu", "/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"}){
+            std::error_code code;
+            for(const auto& entry : std::filesystem::directory_iterator(folder, code)){
+                std::string name = entry.path().filename().string();
+                if(name.rfind("libicuuc.so.", 0) != 0) continue;
+                std::string version = name.substr(12, name.find('.', 12) - 12);
+                HMODULE icu = LoadLibraryA(entry.path().string().c_str());
+                if(!icu) continue;
+                charType = (int8_t(*)(int32_t))GetProcAddress(icu, ("u_charType_" + version).c_str());
+                if(!charType) charType = (int8_t(*)(int32_t))GetProcAddress(icu, "u_charType");
+                if(charType) break;
+            }
+            if(charType) break;
+        }
+        if(!charType){
+            error = "the icu library is missing, install it (on Ubuntu: sudo apt install libicu-dev)";
+            return false;
+        }
+#endif
 
         kinds.assign(0x110000, 0);
         for(int32_t c = 0; c < 0x110000; c++){

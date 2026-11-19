@@ -12,6 +12,7 @@ import { forgetEngine } from './model.js';
 import { readRoutes, routePresets, saveRoutes, setLocalTurns } from './teams.js';
 import { downloadState, modelCatalog, startDownload, stopDownload } from './models.js';
 import { pickFolder } from './picker.js';
+import { onWindows, programPath, stopProgram } from './system.js';
 
 const router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -188,6 +189,11 @@ router.post('/pool/:action', async (req, res) => {
 });
 
 router.get('/firewall', async (req, res) => {
+  // en linux el firewall depende de cada distro y casi siempre viene abierto en la red de la casa
+  if(!onWindows){
+    return res.status(200).json({ready: true, ruleOk: true, publicNetwork: ''});
+  }
+
   const ruleOk = await execFileAsync('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=Sneo pool door'], {windowsHide: true}).then(() => true).catch(() => false);
   const publicNetwork = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', "Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq 'Public' } | Select-Object -First 1 -ExpandProperty Name"], {windowsHide: true})
     .then(result => String(result.stdout || '').trim())
@@ -208,6 +214,10 @@ router.get('/firewall', async (req, res) => {
 });
 
 router.post('/firewall', (req, res) => {
+  if(!onWindows){
+    return res.status(200).json({started: false, message: 'Open tcp ports 9090 and 9097 in this PC firewall if it has one'});
+  }
+
   const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'tools', 'pool_setup.ps1');
   spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], {detached: true, stdio: 'ignore'}).unref();
   return res.status(200).json({started: true});
@@ -367,7 +377,7 @@ router.post('/worker/join', async (req, res) => {
 
   if(!state.running){
     const log = fs.openSync(path.join(rootDir, 'worker.log'), 'a');
-    spawn(path.join(rootDir, 'worker.exe'), ['9090', 'cache', '--no-browser'], {cwd: rootDir, detached: true, stdio: ['ignore', log, log], windowsHide: true}).unref();
+    spawn(programPath(rootDir, 'worker'), ['9090', 'cache', '--no-browser'], {cwd: rootDir, detached: true, stdio: ['ignore', log, log], windowsHide: true}).unref();
     fs.closeSync(log);
     for(let i = 0; i < 40 && !state.running; i++){
       await new Promise(done => setTimeout(done, 500));
@@ -376,7 +386,7 @@ router.post('/worker/join', async (req, res) => {
   }
 
   if(!state.running){
-    return res.status(500).json({message: 'worker.exe did not start; run build.bat to build it'});
+    return res.status(500).json({message: `the worker did not start; run ${onWindows ? 'build.bat' : 'build.sh'} to build it`});
   }
 
   if(state.status === 'joined' && state.host === host){
@@ -399,8 +409,7 @@ router.post('/worker/join', async (req, res) => {
 
 router.post('/worker/leave', async (req, res) => {
   await fetch(`${workerPage}/leave`, {method: 'POST', signal: AbortSignal.timeout(15000)}).catch(() => {});
-  const exe = path.join(rootDir, 'worker.exe').replace(/'/g, "''");
-  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Get-Process worker -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '${exe}' } | Stop-Process -Force`], {windowsHide: true}).catch(() => {});
+  await stopProgram(programPath(rootDir, 'worker'));
   return res.status(200).json({running: false});
 });
 
@@ -552,6 +561,11 @@ const heatShape = buffer => {
 };
 
 const pickFile = async (script) => {
+  // en linux la ventana de abrir es la de zenity y elige un archivo cualquiera
+  if(!onWindows){
+    const result = await execFileAsync('zenity', ['--file-selection', '--title=Sneo'], {timeout: 300000, maxBuffer: 1024 * 100}).catch(() => ({stdout: ''}));
+    return String(result.stdout || '').trim();
+  }
   const result = await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-Command', `Add-Type -AssemblyName System.Windows.Forms; $owner = New-Object System.Windows.Forms.Form -Property @{TopMost = $true}; ${script}; if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.FileName }`], {
     timeout: 300000,
     windowsHide: false,
@@ -1066,7 +1080,7 @@ router.post('/second/start', async (req, res) => {
   const modelPath = String(req.body?.second?.path || req.body?.path || '');
   const gpu = Number.isInteger(Number(req.body?.second?.gpu ?? req.body?.gpu)) ? Number(req.body?.second?.gpu ?? req.body?.gpu) : 0;
   const context = Math.min(262144, Math.max(4096, parseInt(req.body?.second?.context ?? req.body?.context, 10) || 32768));
-  const masterExe = path.join(rootDir, 'master.exe');
+  const masterExe = programPath(rootDir, 'master');
   const mainGpu = main.mainGpu >= 0 ? main.mainGpu : 0;
   const card = (main.gpus || []).find(item => item.ordinal === mainGpu);
   const cardGb = Math.floor(Number(card?.vram || 0) / gib);
@@ -1084,7 +1098,7 @@ router.post('/second/start', async (req, res) => {
   }
 
   if(!fs.existsSync(masterExe)){
-    return res.status(404).json({message: 'master.exe not found, build the engine first.'});
+    return res.status(404).json({message: 'The engine was not found, build it first.'});
   }
 
   if(shared && cardGb < 17){

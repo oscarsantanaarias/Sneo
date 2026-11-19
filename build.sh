@@ -19,7 +19,8 @@ echo "Building the engine..."
 g++ $flags master.cpp -o build/master -ldl
 g++ $flags worker.cpp -o build/worker -ldl
 cp -f build/master master
+cp -f build/worker worker
 echo "Done: master, worker and the tools are up to date."
-if ! ldconfig -p 2>/dev/null | grep -q libnvrtc.so.12; then
-    echo "libnvrtc.so.12 was not found: install the cuda 12 runtime (for example sudo apt install nvidia-cuda-toolkit or the cuda-nvrtc-12 and libcublas-12 packages)"
+if [ ! -f runtime/libnvrtc.so.12 ] && ! ldconfig -p 2>/dev/null | grep -q libnvrtc.so.12; then
+    echo "NVRTC is not here yet: start.sh gets it, or run tools/get_runtime.sh"
 fi

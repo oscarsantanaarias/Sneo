@@ -25,7 +25,7 @@ if [ ! -f runtime/libnvrtc.so.12 ] && { command -v nvidia-smi >/dev/null 2>&1 ||
 fi
 
 # el motor se recompila si el codigo es mas nuevo que el programa
-if [ ! -x master ] || [ ! -x build/worker ] || [ -n "$(find master.cpp worker.cpp src -newer master -type f -print -quit)" ]; then
+if [ ! -x master ] || [ ! -x worker ] || [ -n "$(find master.cpp worker.cpp src -newer master -type f -print -quit)" ]; then
     for pid in $(pgrep -x master); do
         [ "$(readlink -f /proc/$pid/exe 2>/dev/null)" = "$root/master" ] && kill -9 "$pid"
     done

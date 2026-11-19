@@ -48,7 +48,7 @@ struct Brain {
     int draftLength = 3;
     int copyReach = 8;
     std::string cpuPlan = "all";
-    int warmShare = 4;
+    int warmShare = 2;
     bool holdRam = true;
     bool ramWhole = false;
     int pinShare = 50;

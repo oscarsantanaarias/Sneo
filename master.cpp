@@ -112,7 +112,7 @@ struct Engine {
     int draftLength = 3;
     int copyReach = 8;
     std::string cpuPlan = "all";
-    int warmShare = 4;
+    int warmShare = 2;
     bool holdRam = true;
     bool ramWhole = false;
     int pinShare = 50;
@@ -795,7 +795,7 @@ std::string hashText(const std::string& text) {
 
 void savePool() {
     std::ostringstream out;
-    out << "{\"backend\":" << quoteJson(engine.backend) << ",\"speculate\":" << (engine.speculate ? "true" : "false") << ",\"fastRouting\":" << (engine.fastRouting ? "true" : "false") << ",\"foresee\":" << (engine.foresee ? "true" : "false") << ",\"mainGpu\":" << engine.mainGpu << ",\"secondGpu\":" << (engine.secondGpu ? "true" : "false") << ",\"helperGpu\":" << engine.helperGpu << ",\"helperGb\":" << engine.helperGb << ",\"helperFirst\":" << (engine.helperFirst ? "true" : "false") << ",\"frontLayers\":" << engine.frontCap << ",\"draftLength\":" << engine.draftLength << ",\"copyReach\":" << engine.copyReach << ",\"cpuPlan\":" << quoteJson(engine.cpuPlan) << ",\"warmShare\":" << engine.warmShare << ",\"holdRam\":" << (engine.holdRam ? "true" : "false") << ",\"ramWhole\":" << (engine.ramWhole ? "true" : "false") << ",\"pinShare\":" << engine.pinShare << ",\"pinGb\":" << engine.pinGb << ",\"vision\":" << (engine.vision ? "true" : "false") << ",\"visionGpu\":" << engine.visionGpu << ",\"draftSure\":" << engine.draftSure << ",\"context\":" << engine.context << ",\"acceptRequests\":" << (engine.acceptRequests ? "true" : "false") << ",\"doorPort\":" << engine.doorPort
+    out << "{\"backend\":" << quoteJson(engine.backend) << ",\"speculate\":" << (engine.speculate ? "true" : "false") << ",\"fastRouting\":" << (engine.fastRouting ? "true" : "false") << ",\"foresee\":" << (engine.foresee ? "true" : "false") << ",\"mainGpu\":" << engine.mainGpu << ",\"secondGpu\":" << (engine.secondGpu ? "true" : "false") << ",\"helperGpu\":" << engine.helperGpu << ",\"helperGb\":" << engine.helperGb << ",\"helperFirst\":" << (engine.helperFirst ? "true" : "false") << ",\"frontLayers\":" << engine.frontCap << ",\"draftLength\":" << engine.draftLength << ",\"copyReach\":" << engine.copyReach << ",\"cpuPlan\":" << quoteJson(engine.cpuPlan) << ",\"warmShare\":" << engine.warmShare << ",\"tuned\":1,\"holdRam\":" << (engine.holdRam ? "true" : "false") << ",\"ramWhole\":" << (engine.ramWhole ? "true" : "false") << ",\"pinShare\":" << engine.pinShare << ",\"pinGb\":" << engine.pinGb << ",\"vision\":" << (engine.vision ? "true" : "false") << ",\"visionGpu\":" << engine.visionGpu << ",\"draftSure\":" << engine.draftSure << ",\"context\":" << engine.context << ",\"acceptRequests\":" << (engine.acceptRequests ? "true" : "false") << ",\"doorPort\":" << engine.doorPort
         << ",\"apiListen\":" << quoteJson(engine.apiListen) << ",\"model\":" << quoteJson(engine.modelPath.empty() ? engine.savedModel : engine.modelPath) << ",\"folder\":" << quoteJson(engine.modelFolder) << ",\"slots\":[";
     for(size_t i = 0; i < engine.slots.size(); i++){
         const PoolSlot& s = engine.slots[i];
@@ -833,7 +833,9 @@ void loadPool() {
     engine.copyReach = std::max(0, std::min(32, (int)saved["copyReach"].num(8)));
     engine.cpuPlan = saved["cpuPlan"].str("all");
     if(engine.cpuPlan != "performance" && engine.cpuPlan != "performance-ht" && engine.cpuPlan != "auto") engine.cpuPlan = "all";
-    engine.warmShare = std::max(0, std::min(8, (int)saved["warmShare"].num(4)));
+    engine.warmShare = std::max(0, std::min(8, (int)saved["warmShare"].num(2)));
+    // el reparto por defecto era 4: medido de nuevo rinde mas con 2 y lo guardado con el valor viejo pasa al nuevo una sola vez
+    if(saved["tuned"].num(0) < 1 && engine.warmShare == 4) engine.warmShare = 2;
     engine.holdRam = saved["holdRam"].truthy(true);
     engine.ramWhole = saved["ramWhole"].truthy(false);
     engine.pinShare = std::max(10, std::min(95, (int)saved["pinShare"].num(50)));
@@ -2487,7 +2489,7 @@ void handleClient(SOCKET client) {
             int reach = body.has("copyReach") ? std::max(0, std::min(32, (int)body["copyReach"].num(8))) : engine.copyReach;
             std::string plan = body.has("cpuPlan") ? body["cpuPlan"].str("all") : engine.cpuPlan;
             if(plan != "performance" && plan != "performance-ht" && plan != "auto") plan = "all";
-            int share = body.has("warmShare") ? std::max(0, std::min(8, (int)body["warmShare"].num(4))) : engine.warmShare;
+            int share = body.has("warmShare") ? std::max(0, std::min(8, (int)body["warmShare"].num(2))) : engine.warmShare;
             double sure = body.has("draftSure") ? std::max(0.0, std::min(0.99, body["draftSure"].num(0.6))) : engine.draftSure;
             bool guessing = body.has("speculate") ? body["speculate"].truthy(true) : engine.speculate;
             bool skipping = body.has("fastRouting") ? body["fastRouting"].truthy(true) : engine.fastRouting;

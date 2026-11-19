@@ -446,7 +446,7 @@ struct GpuModel {
     bool pinWarm = true;
     int pinShare = 50;
     double pinGb = 0;
-    int warmShare = 4;
+    int warmShare = 2;
     bool tensorPlain = true;
     bool tilePlain = true;
     bool typedRows = true;

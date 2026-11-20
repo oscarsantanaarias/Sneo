@@ -658,16 +658,17 @@ inline bool GpuModel::loadHy4(const std::string& path, int threads) {
     }
     if(relayable){
         int rows = 16, pairs = rows * s.used;
-        uint64_t flagsOn = 0;
-        b.hostRelayIds = (int*)shared((uint64_t)s.layers * pairs * 4, b.relayIds);
-        b.hostRelayWeights = (float*)shared((uint64_t)s.layers * pairs * 4, b.relayWeights);
-        b.hostRelayCpu = (int*)shared((uint64_t)s.layers * (pairs + 1) * 4, b.relayCpu);
+        uint64_t flagsOn = 0, turns = 2ULL * s.layers;
+        b.hostRelayIds = (int*)shared(turns * pairs * 4, b.relayIds);
+        b.hostRelayWeights = (float*)shared(turns * pairs * 4, b.relayWeights);
+        b.hostRelayCpu = (int*)shared(turns * (pairs + 1) * 4, b.relayCpu);
         b.relayFlags = (volatile uint32_t*)shared(64 * 4, flagsOn);
         b.relayFlagsOn = flagsOn;
         b.relayDevIds = grab((uint64_t)pairs * 4);
         b.relayDevWeights = grab((uint64_t)pairs * 4);
         b.relayHits = grab((uint64_t)(1 + 2 * pairs) * 4);
-        b.relaySpill = grab((uint64_t)s.layers * 4);
+        b.relaySpill = grab(turns * 4);
+        b.splitOn = getenv("SNEO_HY_NO_SPLIT") == nullptr;
         b.slotMap = grab((uint64_t)s.layers * s.experts * 4);
         if(b.hostRelayIds && b.hostRelayWeights && b.hostRelayCpu && b.relayFlags && b.relayDevIds && b.relayDevWeights && b.relayHits && b.relaySpill && b.slotMap){
             for(int i = 0; i < 64; i++) b.relayFlags[i] = 0;
@@ -2350,11 +2351,12 @@ inline void GpuModel::hyAttention(int l, int n) {
         go("hyRope", spread, 16, 32, 1, b.idxQ, 2048, 128, 64, b.positions, s.ropeBase, 64);
         go("hyIdxScore", (unsigned int)((s.idxGroups + 127) / 128), spread, 128, 1, b.idxQ, b.idxW, L.idxPools, b.positions, b.idxScores, s.idxGroups, s.idxKeep, s.idxScale);
         go("hySelect", spread, 1, 1024, 1, b.idxScores, s.idxGroups, b.positions, b.idxList, b.idxCount, s.idxWidth, s.idxKeep);
-        if(L.idxSnap && n <= L.idxSnapCap){
+        // la segunda mitad de filas deja lo suyo despues de la primera en la copia
+        if(L.idxSnap && b.snapAt + n <= L.idxSnapCap){
             CudaQueue& queue = cudaQueue();
-            if(queue.copyAcross(L.idxSnap, b.idxList, (size_t)n * s.idxWidth * 4, stream) != 0 || queue.copyAcross(L.idxSnapCount, b.idxCount, (size_t)n * 4, stream) != 0) failed = true;
+            if(queue.copyAcross(L.idxSnap + 4ULL * b.snapAt * s.idxWidth, b.idxList, (size_t)n * s.idxWidth * 4, stream) != 0 || queue.copyAcross(L.idxSnapCount + 4ULL * b.snapAt, b.idxCount, (size_t)n * 4, stream) != 0) failed = true;
             L.idxSnapFirst = b.firstPos;
-            L.idxSnapRows = n;
+            L.idxSnapRows = b.snapAt + n;
         }
     }
     if(side) hyBack();
@@ -2399,8 +2401,66 @@ inline void GpuModel::hyAttention(int l, int n) {
     hyHcOut(b.attn, L.postAttnNorm, n);
 }
 
+// la segunda mitad de las filas de un paso: cada buffer por fila corrido rows filas, los de atencion con las cabezas de esa capa
+// lo que se usa y se termina dentro de la misma mitad (cublas, memoria de paso, expertos de la vram) queda igual
+inline HyBuffers GpuModel::hyRowsView(const HyBuffers& base, int rows, int l) {
+    HyShape& s = hyShape;
+    const HyLayer& L = hyLayers[l];
+    HyBuffers v = base;
+    uint64_t r = (uint64_t)rows, d = (uint64_t)s.hidden, hc = (uint64_t)s.hc, heads = (uint64_t)L.heads;
+    v.streams += r * d * hc * 4;
+    v.flat += r * d * hc * 4;
+    v.mixes += r * 16 * 4;
+    v.post += r * 8 * 4;
+    v.cur += r * d * 4;
+    v.xn += r * d * 4;
+    v.qa += r * s.qLora * 4;
+    v.q += r * heads * (s.nope + s.rope) * 4;
+    v.kv += r * 576 * 4;
+    v.qfull += r * heads * 576 * 4;
+    v.latentOut += r * heads * 512 * 4;
+    v.heads += r * heads * s.headValue * 4;
+    v.gateOut += r * heads * s.headValue * 4;
+    v.attn += r * d * 4;
+    v.bigGate += r * s.feedForward * 4;
+    v.bigUp += r * s.feedForward * 4;
+    v.bigHid += r * s.feedForward * 4;
+    v.ffn += r * d * 4;
+    v.shared += r * d * 4;
+    v.sGate += r * s.expertWidth * 4;
+    v.sUp += r * s.expertWidth * 4;
+    v.sHid += r * s.expertWidth * 4;
+    v.routedIn += r * s.latent * 4;
+    v.routedOut += r * s.latent * 4;
+    v.logits += r * s.experts * 4;
+    v.positions += r * 4;
+    if(s.indexed){
+        v.idxKey += r * 128 * 4;
+        v.idxQ += r * 2048 * 4;
+        v.idxW += r * 16 * 4;
+        v.idxScores += r * s.idxGroups * 4;
+        v.idxList += r * s.idxWidth * 4;
+        v.idxCount += r * 4;
+    }
+    if(s.engramModules > 0){
+        v.engramNormed += r * s.engramHeads * s.engramDim * 4;
+        v.engramKv += r * (hc + 1) * d * 4;
+        v.mappedEngram += r * s.engramModules * s.engramHeads * s.engramDim * 4;
+    }
+    v.mappedLatent += r * s.latent * 4;
+    v.hostLatent += r * s.latent;
+    v.mappedMoe += r * s.latent * 4;
+    v.hostMoe += r * s.latent;
+    v.relayDevIds += r * s.used * 4;
+    v.relayDevWeights += r * s.used * 4;
+    v.relayHalf = 1;
+    v.snapAt = rows;
+    return v;
+}
+
 // part 0 hace la capa entera, 1 hasta antes de los expertos y 2 desde los expertos ya sumados en routedOut
 // la 3 es la 1 dejando ademas la entrada latente en la memoria que lee la cpu y la 4 es la capa entera dentro del grafo del relevo
+// en el relevo con dos mitades la 5 es el frente (atencion, reparto, aviso y los de la vram) y la 6 el fondo (espera a la cpu, suma y cierra)
 inline void GpuModel::hyLayer(int l, int n, int part) {
     HyShape& s = hyShape;
     HyBuffers& b = hyBuffers;
@@ -2409,7 +2469,9 @@ inline void GpuModel::hyLayer(int l, int n, int part) {
     unsigned int spread = (unsigned int)n;
     auto blocks = [](uint64_t count){ return (unsigned int)((count + 255) / 256); };
     PackedInput& pk = packs[0];
-    if(part != 2){
+    bool front = part != 2 && part != 6;
+    bool back = part != 1 && part != 3 && part != 5;
+    if(front){
         hyAttention(l, n);
         // red de avance
         hyHcIn(b.streams, L.hcFfnFn, L.hcFfnScale, L.hcFfnBase, L.ffnNorm, b.xn, b.post, 2 * hc, n, true);
@@ -2421,10 +2483,12 @@ inline void GpuModel::hyLayer(int l, int n, int part) {
         if(L.ffnDown.type != 30 && L.ffnDown.type != 1) project(L.ffnDown, b.bigHid, 0, b.ffn, n);
         else hyProject(L.ffnDown, b.bigHid, b.ffn, n);
     } else {
-        if(part != 2){
-            bool relayed = part == 4;
-            // en el relevo el router va por la cola de al lado mientras la principal hace las proyecciones
-            bool side = relayed && b.relaySide;
+        bool relayed = part >= 4;
+        // en el relevo el router va por la cola de al lado mientras la principal hace las proyecciones
+        bool side = relayed && b.relaySide && !b.splitting;
+        int turn = 2 * l + b.relayHalf;
+        uint64_t turnIds = 4ULL * turn * b.relayPairs, turnCpu = 4ULL * turn * (b.relayPairs + 1), turnSpill = 4ULL * turn;
+        if(front){
             if(side) hyFork();
             go("hyF32Wide", (unsigned int)s.experts, spread, 128, 1, L.router, b.xn, d, b.logits, s.experts, d);
             go("hyRouteFast", spread, 1, 512, 1, b.logits, L.routerBias, relayed ? b.relayDevIds : b.mappedIds, relayed ? b.relayDevWeights : b.mappedWeights, s.experts, s.used, s.expertScale, s.expertNorm ? 1 : 0);
@@ -2437,8 +2501,8 @@ inline void GpuModel::hyLayer(int l, int n, int part) {
             // despues los de la vram van por la cola de al lado y el compartido por la principal, a la vez
             if(relayed){
                 int pairs = n * s.used;
-                go("hyRelayPlan", 1, 1, (unsigned int)((pairs + 31) / 32 * 32), 1, b.relayDevIds, b.relayDevWeights, b.slotMap + 4ULL * l * s.experts, pairs, s.used, s.experts, b.relayTail, b.relayHits, b.relayPairs, b.relayIds + 4ULL * l * b.relayPairs, b.relayWeights + 4ULL * l * b.relayPairs, b.relayCpu + 4ULL * l * (b.relayPairs + 1), b.relaySpill + 4ULL * l);
-                go("tellHost", 1, 1, 1, 1, b.relayFlagsOn + 64, b.relayFlagsOn, l);
+                go("hyRelayPlan", 1, 1, (unsigned int)((pairs + 31) / 32 * 32), 1, b.relayDevIds, b.relayDevWeights, b.slotMap + 4ULL * l * s.experts, pairs, s.used, s.experts, b.relayTail, b.relayHits, b.relayPairs, b.relayIds + turnIds, b.relayWeights + turnIds, b.relayCpu + turnCpu, b.relaySpill + turnSpill);
+                go("hyTell", 1, 1, 1, 1, b.relayFlagsOn + 64, b.relayFlagsOn, turn);
                 if(side) hyFork();
                 hyRelayExperts(l, n);
                 if(side) hyBack();
@@ -2451,16 +2515,18 @@ inline void GpuModel::hyLayer(int l, int n, int part) {
             go("hySwigluPack", (unsigned int)(((uint64_t)n * ew / 32 + 7) / 8), 1, 32, 8, b.sGate, b.sUp, b.sHid, n * ew, 0.0f, pk.values, pk.scales, pk.sums);
             if(L.sharedDown.type != 30 && L.sharedDown.type != 1) project(L.sharedDown, b.sHid, 0, b.shared, n);
             else hyProject(L.sharedDown, b.sHid, b.shared, n);
-            if(part == 1 || part == 3) return;
+        }
+        if(!back) return;
+        if(part != 2){
             if(relayed){
                 // lo de la cpu se espera en la gpu y se suma cuando terminaron los de la vram
-                go("awaitHost", 1, 1, 1, 1, b.relayFlagsOn + 128, b.relayFlagsOn, l, b.relaySpill + 4ULL * l, b.relayFlagsOn + 192, b.relayFlagsOn + 160);
+                go("hyAwait", 1, 1, 1, 1, b.relayFlagsOn + 128, b.relayFlagsOn, turn, b.relaySpill + turnSpill, b.relayFlagsOn + 192, b.relayFlagsOn + 160);
                 if(side) hyJoin();
-                go("hyRelayAdd", blocks((uint64_t)n * s.latent), 1, 256, 1, b.routedOut, b.mappedMoe, b.relaySpill + 4ULL * l, n * s.latent);
+                go("hyRelayAdd", blocks((uint64_t)n * s.latent), 1, 256, 1, b.routedOut, b.mappedMoe, b.relaySpill + turnSpill, n * s.latent);
             } else {
                 // la cpu calcula los expertos que no estan en la vram mientras la gpu hace los suyos
                 auto waited = std::chrono::steady_clock::now();
-                if(queue.eventSync(hyRouted) != 0) failed = true;
+                if(cudaQueue().eventSync(hyRouted) != 0) failed = true;
                 hyCache.waitMs += since(waited);
                 if(!failed) hyExperts(l, n);
             }
@@ -2571,10 +2637,15 @@ inline bool GpuModel::hyRelay(int n) {
     if(b.relayMax <= 0 || n > b.relayMax || !useGraphs || profile || b.graphs || cache.warmSlots || (helper.ready && cache.helpSlots > 0)) return false;
     CudaQueue& queue = cudaQueue();
     volatile uint32_t* flags = b.relayFlags;
-    int used = s.used, pairs = n * s.used;
+    int used = s.used;
     int tail = hyTailRanks(used, tailSkip);
     bool scored = s.indexed && (hyTop >> 2) > s.idxKeep;
-    int key = (1 << 26) | (n << 8) | (tail << 1) | (scored ? 1 : 0);
+    // con dos filas o mas y contexto largo el paso se parte en dos mitades que se turnan: la cpu hace los expertos de una mientras la gpu atiende la otra
+    // medido en la 3090 sola: codigo con 10K de contexto 57.6 a 62.5 tok/s; con contexto corto la gpu tiene poco que hacer y partir costaba 3%
+    int first = b.splitOn && n >= 2 && scored ? n / 2 : n;
+    int halves = first < n ? 2 : 1;
+    int rowsOf[2] = {first, n - first}, fromOf[2] = {0, first};
+    int key = (1 << 26) | (halves == 2 ? 1 << 24 : 0) | (n << 8) | (tail << 1) | (scored ? 1 : 0);
     if(graphless.count(key)) return false;
     hyCollectUploads(false);
     if(cache.mapDirty){
@@ -2586,13 +2657,55 @@ inline bool GpuModel::hyRelay(int n) {
     flags[0] = ticket;
     _mm_sfence();
     b.relayTail = tail;
+    std::vector<int> moe;
+    for(int l = 0; l < s.layers; l++){
+        if(!hyLayers[l].dense) moe.push_back(l);
+    }
     auto work = [&]{
         go("hySpread", (unsigned int)n, 1, 256, 1, b.mappedEmbed, b.streams, s.hidden, s.hc);
-        for(int l = 0; l < s.layers && !failed; l++) hyLayer(l, n, hyLayers[l].dense ? 0 : 4);
+        if(halves == 1){
+            for(int l = 0; l < s.layers && !failed; l++) hyLayer(l, n, hyLayers[l].dense ? 0 : 4);
+            return;
+        }
+        // la segunda mitad va siempre una capa atras: frente de las dos, despues fondo de una y frente de la siguiente para cada mitad
+        HyBuffers base = hyBuffers;
+        auto half = [&](int h, int l){ hyBuffers = h ? hyRowsView(base, first, l) : base; };
+        for(int l = 0; l < s.layers && !failed; l++){
+            if(!hyLayers[l].dense) continue;
+            half(0, l);
+            hyLayer(l, rowsOf[0], 0);
+            half(1, l);
+            hyLayer(l, rowsOf[1], 0);
+        }
+        if(!moe.empty()){
+            half(0, moe[0]);
+            hyLayer(moe[0], rowsOf[0], 5);
+            half(1, moe[0]);
+            hyLayer(moe[0], rowsOf[1], 5);
+        }
+        for(size_t i = 0; i < moe.size() && !failed; i++){
+            int l = moe[i];
+            bool more = i + 1 < moe.size();
+            half(0, l);
+            hyLayer(l, rowsOf[0], 6);
+            if(more){
+                half(0, moe[i + 1]);
+                hyLayer(moe[i + 1], rowsOf[0], 5);
+            }
+            half(1, l);
+            hyLayer(l, rowsOf[1], 6);
+            if(more){
+                half(1, moe[i + 1]);
+                hyLayer(moe[i + 1], rowsOf[1], 5);
+            }
+        }
+        hyBuffers = base;
     };
     b.relaying = true;
+    b.splitting = halves == 2;
     bool recorded = replay(tokenGraphs[key], work);
     b.relaying = false;
+    b.splitting = false;
     if(!recorded){
         graphless.insert(key);
         std::cout << "hy_v4_flash: the step with " << n << " rows cannot go in one launch (" << graphProblem << "), it goes layer by layer" << std::endl;
@@ -2601,48 +2714,57 @@ inline bool GpuModel::hyRelay(int n) {
     if(failed) return true;
     queue.query(stream);
     std::vector<char> onCpu;
-    for(int l = 0; l < s.layers && !failed; l++){
+    int* idsWere = b.hostIds;
+    float* weightsWere = b.hostWeights;
+    float* latentWas = b.hostLatent;
+    float* moeWas = b.hostMoe;
+    for(size_t i = 0; i < moe.size() && !failed; i++){
+        int l = moe[i];
         HyLayer& L = hyLayers[l];
-        if(L.dense) continue;
-        uint32_t want = ticket * 64u + (uint32_t)l + 1u;
-        auto waited = std::chrono::steady_clock::now();
-        uint32_t spins = 0;
-        while(flags[16] < want){
-            _mm_pause();
-            if(++spins % 4096 != 0) continue;
-            queue.query(stream);
-            if(since(waited) > 20000.0){
-                launchProblem = "the gpu never reached the experts of layer " + std::to_string(l);
-                failed = true;
-                break;
+        for(int h = 0; h < halves && !failed; h++){
+            int turn = 2 * l + h, rows = rowsOf[h], pairs = rows * used;
+            uint32_t want = ticket * 128u + (uint32_t)turn + 1u;
+            auto waited = std::chrono::steady_clock::now();
+            uint32_t spins = 0;
+            while(flags[16] < want){
+                _mm_pause();
+                if(++spins % 4096 != 0) continue;
+                queue.query(stream);
+                if(since(waited) > 20000.0){
+                    launchProblem = "the gpu never reached the experts of layer " + std::to_string(l);
+                    failed = true;
+                    break;
+                }
             }
+            cache.waitMs += since(waited);
+            if(failed) break;
+            const int* list = b.hostRelayCpu + (size_t)turn * (b.relayPairs + 1);
+            int count = std::min(list[0], pairs);
+            if(count <= 0) continue;
+            flags[40] = want;
+            onCpu.assign(pairs, 0);
+            for(int k = 0; k < count; k++){
+                int pair = list[1 + k];
+                if(pair >= 0 && pair < pairs) onCpu[pair] = 1;
+            }
+            b.hostIds = b.hostRelayIds + (size_t)turn * b.relayPairs;
+            b.hostWeights = b.hostRelayWeights + (size_t)turn * b.relayPairs;
+            b.hostLatent = latentWas + (size_t)fromOf[h] * s.latent;
+            b.hostMoe = moeWas + (size_t)fromOf[h] * s.latent;
+            auto cpuFrom = std::chrono::steady_clock::now();
+            hyExpertsHost(L, rows, onCpu);
+            cache.cpuMs += since(cpuFrom);
+            b.hostIds = idsWere;
+            b.hostWeights = weightsWere;
+            b.hostLatent = latentWas;
+            b.hostMoe = moeWas;
+            _mm_sfence();
+            flags[32] = want;
         }
-        cache.waitMs += since(waited);
-        if(failed) break;
-        const int* list = b.hostRelayCpu + (size_t)l * (b.relayPairs + 1);
-        int count = std::min(list[0], pairs);
-        if(count <= 0) continue;
-        flags[40] = want;
-        onCpu.assign(pairs, 0);
-        for(int k = 0; k < count; k++){
-            int pair = list[1 + k];
-            if(pair >= 0 && pair < pairs) onCpu[pair] = 1;
-        }
-        int* idsWere = b.hostIds;
-        float* weightsWere = b.hostWeights;
-        b.hostIds = b.hostRelayIds + (size_t)l * b.relayPairs;
-        b.hostWeights = b.hostRelayWeights + (size_t)l * b.relayPairs;
-        auto cpuFrom = std::chrono::steady_clock::now();
-        hyExpertsHost(L, n, onCpu);
-        cache.cpuMs += since(cpuFrom);
-        b.hostIds = idsWere;
-        b.hostWeights = weightsWere;
-        _mm_sfence();
-        flags[32] = want;
     }
-    // si algo fallo la gpu no se queda esperando: todas las capas quedan como hechas
+    // si algo fallo la gpu no se queda esperando: todos los turnos quedan como hechos
     if(failed){
-        flags[32] = ticket * 64u + 64u;
+        flags[32] = ticket * 128u + 127u;
         _mm_sfence();
     }
     auto headFrom = std::chrono::steady_clock::now();
@@ -2658,6 +2780,7 @@ inline bool GpuModel::hyRelay(int n) {
         return false;
     }
     b.relaySteps++;
+    if(halves == 2) b.splitSteps++;
     // lo que el recorrido anota en el host no corre al repetir el grafo: va aca
     for(HyLayer& L : hyLayers){
         bool layerScored = L.indexed && (hyTop >> 2) > s.idxKeep;
@@ -2668,17 +2791,19 @@ inline bool GpuModel::hyRelay(int n) {
         }
     }
     // el calor y los cambios de la vram se hacen con la gpu quieta, con lo que eligio cada capa en este paso
-    for(int l = 0; l < s.layers; l++){
-        if(hyLayers[l].dense) continue;
-        const int* ids = b.hostRelayIds + (size_t)l * b.relayPairs;
-        for(int i = 0; i < pairs; i++){
-            int e = ids[i];
-            if(e < 0 || e >= s.experts) continue;
-            size_t at = (size_t)l * s.experts + e;
-            cache.heat[at]++;
-            cache.total++;
-            if(cache.slotOf[at] >= 0) cache.hits++;
-            else if(i % used >= tail) cache.skipped++;
+    for(int l : moe){
+        for(int h = 0; h < halves; h++){
+            int turn = 2 * l + h, pairs = rowsOf[h] * used;
+            const int* ids = b.hostRelayIds + (size_t)turn * b.relayPairs;
+            for(int i = 0; i < pairs; i++){
+                int e = ids[i];
+                if(e < 0 || e >= s.experts) continue;
+                size_t at = (size_t)l * s.experts + e;
+                cache.heat[at]++;
+                cache.total++;
+                if(cache.slotOf[at] >= 0) cache.hits++;
+                else if(i % used >= tail) cache.skipped++;
+            }
         }
     }
     if(cache.ageEvery > 0 && ++cache.aged % (uint64_t)cache.ageEvery == 0){
@@ -2689,13 +2814,13 @@ inline bool GpuModel::hyRelay(int n) {
     if(trace){
         int top[3] = {n, used, tail};
         fwrite(top, 4, 3, trace);
-        for(int l = 0; l < s.layers; l++){
-            if(!hyLayers[l].dense) fwrite(b.hostRelayIds + (size_t)l * b.relayPairs, 4, pairs, trace);
+        for(int l : moe){
+            for(int h = 0; h < halves; h++) fwrite(b.hostRelayIds + (size_t)(2 * l + h) * b.relayPairs, 4, rowsOf[h] * used, trace);
         }
         fflush(trace);
     }
-    for(int l = 0; l < s.layers && !failed; l++){
-        if(!hyLayers[l].dense) hySwapIn(l, n, b.hostRelayIds + (size_t)l * b.relayPairs);
+    for(int l : moe){
+        for(int h = 0; h < halves && !failed; h++) hySwapIn(l, rowsOf[h], b.hostRelayIds + (size_t)(2 * l + h) * b.relayPairs);
     }
     b.afterMs += since(afterFrom);
     return true;
@@ -2768,7 +2893,7 @@ inline std::vector<float> GpuModel::forwardHy4(const std::vector<int>& ids, cons
     headMs = since(clock);
     static int calls = 0;
     if(hyCache.total - hyCache.heatSaved > 200000) hySaveHeat();
-    if(ids.size() > 1 || ++calls % 64 == 0) std::cout << "hy_v4_flash: experts found in video memory " << (hyCache.total ? 100 * hyCache.hits / hyCache.total : 0) << "% of " << hyCache.total << ", graph runs " << b.graphRuns << ", one launch steps " << b.relaySteps << " (retried " << b.relayRetries << ")" << ", ram free " << hyRamFreeGb() << " GB, engram " << (int)b.engramMs << " ms, head " << (int)b.headMs << " ms, after " << (int)b.afterMs << " ms" << ", drafter proposed " << hyDraft.proposed << " (cut " << hyDraft.cut << " unsure, sparse " << hyDraft.sparseSteps << ") in " << (int)hyDraft.ms << " ms, steps " << hyDraft.steps << " first right " << hyDraft.firstKept << " kept " << hyDraft.kept << ", on the second card " << hyCache.helpUsed << " (" << (int)hyCache.helpMs << " ms waiting)" << ", from pinned ram " << hyCache.warmUsed << ", skipped " << hyCache.skipped << ", uploads " << hyCache.uploads << ", free slots " << hyCache.free.size() << ", ms in this call: total " << since(clock) << " cpu experts " << hyCache.cpuMs << " (" << (int)(hyCache.cpuBytes / 1048576.0 / std::max(0.001, hyCache.cpuMs)) << " GB/s; prep " << (int)hyCache.stageMs[0] << " gate+up " << (int)hyCache.stageMs[1] << " ms at " << (int)(hyCache.stageBytes[0] / 1048576.0 / std::max(0.001, hyCache.stageMs[1])) << " GB/s, act " << (int)hyCache.stageMs[2] << " pack " << (int)hyCache.stageMs[3] << " down " << (int)hyCache.stageMs[4] << " ms at " << (int)(hyCache.stageBytes[1] / 1048576.0 / std::max(0.001, hyCache.stageMs[4])) << " GB/s, sum " << (int)hyCache.stageMs[5] << ")" << " waiting for the gpu " << hyCache.waitMs << " uploads " << hyCache.uploadMs << std::endl;
+    if(ids.size() > 1 || ++calls % 64 == 0) std::cout << "hy_v4_flash: experts found in video memory " << (hyCache.total ? 100 * hyCache.hits / hyCache.total : 0) << "% of " << hyCache.total << ", graph runs " << b.graphRuns << ", one launch steps " << b.relaySteps << " (retried " << b.relayRetries << ", in halves " << b.splitSteps << ")" << ", ram free " << hyRamFreeGb() << " GB, engram " << (int)b.engramMs << " ms, head " << (int)b.headMs << " ms, after " << (int)b.afterMs << " ms" << ", drafter proposed " << hyDraft.proposed << " (cut " << hyDraft.cut << " unsure, sparse " << hyDraft.sparseSteps << ") in " << (int)hyDraft.ms << " ms, steps " << hyDraft.steps << " first right " << hyDraft.firstKept << " kept " << hyDraft.kept << ", on the second card " << hyCache.helpUsed << " (" << (int)hyCache.helpMs << " ms waiting)" << ", from pinned ram " << hyCache.warmUsed << ", skipped " << hyCache.skipped << ", uploads " << hyCache.uploads << ", free slots " << hyCache.free.size() << ", ms in this call: total " << since(clock) << " cpu experts " << hyCache.cpuMs << " (" << (int)(hyCache.cpuBytes / 1048576.0 / std::max(0.001, hyCache.cpuMs)) << " GB/s; prep " << (int)hyCache.stageMs[0] << " gate+up " << (int)hyCache.stageMs[1] << " ms at " << (int)(hyCache.stageBytes[0] / 1048576.0 / std::max(0.001, hyCache.stageMs[1])) << " GB/s, act " << (int)hyCache.stageMs[2] << " pack " << (int)hyCache.stageMs[3] << " down " << (int)hyCache.stageMs[4] << " ms at " << (int)(hyCache.stageBytes[1] / 1048576.0 / std::max(0.001, hyCache.stageMs[4])) << " GB/s, sum " << (int)hyCache.stageMs[5] << ")" << " waiting for the gpu " << hyCache.waitMs << " uploads " << hyCache.uploadMs << std::endl;
     bool wideCall = b.wideUploaded > 0;
     if(wideCall) std::cout << "hy_v4_flash: prompt on the gpu, experts uploaded " << (b.wideUploaded >> 20) << " MB, cpu copying " << (int)b.wideUploadMs << " ms (" << (int)(b.wideUploaded / 1048576.0 / std::max(1.0, b.wideUploadMs)) << " GB/s), experts " << (int)b.wideBatchMs << " ms, attention and the rest of the layers " << (int)b.wideLayersMs << " ms, engram rows " << (int)b.wideEngramMs << " ms, whole call " << (int)since(clock) << " ms" << std::endl;
     b.wideUploaded = 0;

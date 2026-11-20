@@ -291,6 +291,34 @@ __device__ __forceinline__ void unpackGroup(int type, const u8* block, int g, in
         return;
     }
 
+    if(type == 39){
+        #pragma unroll
+        for(int i = 0; i < 4; i++){
+            u32 raw = load32(block + 1 + 4 * i);
+            w[i] = fp4Bytes(raw & 0x0F0F0F0Fu);
+            w[i + 4] = fp4Bytes((raw >> 4) & 0x0F0F0F0Fu);
+        }
+        low = mxScale(block[0]);
+        high = low;
+        return;
+    }
+
+    // nvfp4 tiene dos escalas por grupo de 32: low para los primeros 16 y high para los otros 16
+    if(type == 40){
+        #pragma unroll
+        for(int s = 0; s < 2; s++){
+            const u8* qs = block + 4 + 8 * (2 * g + s);
+            u32 a = load32(qs), b = load32(qs + 4);
+            w[4 * s] = fp4Bytes(a & 0x0F0F0F0Fu);
+            w[4 * s + 1] = fp4Bytes(b & 0x0F0F0F0Fu);
+            w[4 * s + 2] = fp4Bytes((a >> 4) & 0x0F0F0F0Fu);
+            w[4 * s + 3] = fp4Bytes((b >> 4) & 0x0F0F0F0Fu);
+        }
+        low = nvScale(block[2 * g]);
+        high = nvScale(block[2 * g + 1]);
+        return;
+    }
+
     if(type == 20 || type == 23){
         float d = half(word(block));
         const u8* qs = type == 20 ? block + 2 : block + 8 + 16 * g;
@@ -613,7 +641,7 @@ __device__ __forceinline__ float exactFloat(int v) {
 
 template<int TYPE, bool FINE, bool WIDE>
 __device__ __forceinline__ void dotRowsBody(const u8* weights, u64 rowBytes, u64 expertBytes, const int* groupSlot, const int* groupStart, const int* groupCount, const int* inputIndex, const i8* packed, const float* scales, const int* sums, const i8* fine, const float* fineScales, const int* fineSums, float* output, int rows, int cols, int count, int tiles, const int* tokenOf, const float* weightOf, unsigned long long* gather, GridTables t) {
-    constexpr bool twin = TYPE == 14 || TYPE == 17 || TYPE == 22 || TYPE == 29;
+    constexpr bool twin = TYPE == 14 || TYPE == 17 || TYPE == 22 || TYPE == 29 || TYPE == 40;
     constexpr bool shifted = TYPE == 12 || TYPE == 13 || TYPE == 7;
     constexpr int TOK = WIDE ? 128 : 64;
     constexpr int THREADS = WIDE ? 256 : 128;
@@ -835,6 +863,8 @@ DOT_ROWS(21)
 DOT_ROWS(22)
 DOT_ROWS(23)
 DOT_ROWS(29)
+DOT_ROWS(39)
+DOT_ROWS(40)
 DOT_ROWS(42)
 
 __device__ __forceinline__ void fullStep(int* c, int a0, int a1, int a2, int a3, int b0, int b1) {
@@ -1290,7 +1320,7 @@ extern "C" __global__ void mmaWide(int type, const u8* weights, u64 rowBytes, u6
     int rowBase = blockIdx.x * 64;
     int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gid = lane >> 2, quad = lane & 3;
     int warpRow = (warp & 3) * 16, warpTok = (warp >> 2) * 64;
-    bool uniform = type != 14 && type != 17 && type != 22 && type != 29;
+    bool uniform = type != 14 && type != 17 && type != 22 && type != 29 && type != 40;
     if(tid < 128){
         int j = first + tid;
         source[tid] = j >= total
@@ -3711,6 +3741,26 @@ extern "C" __global__ void writeExperts(float* R, const float* shared, const flo
     #pragma unroll
     for(int c = 0; c < HC; c++) R[at + c * HIDDEN] += v * 2.0f * gateOf(inj[t * HC + c] * (1.0f / HC));
 #endif
+}
+
+// nvfp4 con escala por experto: up y down son lineales y su escala va al peso de cada ruta
+extern "C" __global__ void routeScale(const int* ids, float* weights, const float* factor, int routes) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if(i < routes) weights[i] *= factor[ids[i]];
+}
+
+// la escala de gate va antes del silu: cada ruta escala su fila de la gpu (las de la cpu se escalan alla)
+extern "C" __global__ void gateScaleRoutes(float* gate, const int* assign, const int* ids, const float* scales, int spillBase, int width) {
+    int r = blockIdx.x;
+    int a = assign[r];
+    if(a < 0 || a >= spillBase) return;
+    float s = scales[ids[r]];
+    for(int i = threadIdx.x; i < width; i += blockDim.x) gate[(u64)a * width + i] *= s;
+}
+
+extern "C" __global__ void scaleRows(float* rows, const float* scale, int width) {
+    float s = scale[blockIdx.x];
+    for(int i = threadIdx.x; i < width; i += blockDim.x) rows[(u64)blockIdx.x * width + i] *= s;
 }
 
 extern "C" __global__ void writeMixed(float* R, const float* shared, const float* scalar, const long long* moe, const float* inj, int n) {

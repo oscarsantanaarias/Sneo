@@ -98,6 +98,9 @@ struct GpuLayer {
     Matrix hostGate, hostUp, hostDown;
     Matrix expertGate, expertUp, expertDown;
     const TensorInfo* expertTensor[3] = {};
+    // nvfp4 con escala por experto: la de gate por separado y la de up por down juntas (van al peso de la ruta)
+    std::vector<float> gateScale, routeFactor;
+    uint64_t gateScaleOnGpu = 0, routeFactorOnGpu = 0;
     uint64_t resident[3] = {};
     std::vector<int> slot;
     std::vector<int> lastRouting;
@@ -499,6 +502,9 @@ struct GpuModel {
     uint64_t moeOut = 0;
     uint64_t splitScratch = 0;
     float* hostWeights = nullptr;
+    bool expertScales = false;
+    uint64_t gateRows = 0, mappedGateRows = 0;
+    float* hostGateRows = nullptr;
     uint64_t mappedWeights = 0;
     uint64_t streamedCount = 0;
     double streamMs = 0;
@@ -1030,7 +1036,7 @@ struct GpuModel {
             : wide && wideTiles
                 ? "mmaWide"
                 : deepTiles
-                    ? std::string(type == 14 || type == 17 || type == 22 || type == 29 ? "mmaDeepSplit" : "mmaDeep") + (fineIn ? "" : "Lean") + (wide && deepWide ? (tallTiles && !fineIn ? "X" : "W") : "")
+                    ? std::string(type == 14 || type == 17 || type == 22 || type == 29 || type == 40 ? "mmaDeepSplit" : "mmaDeep") + (fineIn ? "" : "Lean") + (wide && deepWide ? (tallTiles && !fineIn ? "X" : "W") : "")
                     : "mmaRows";
     }
 
@@ -1292,6 +1298,10 @@ struct GpuModel {
                     : "missing tensor " + name;
                 return;
             }
+            if(t->type == 40 && name.size() > 7 && findTensor(file, name.substr(0, name.size() - 7) + ".scale")){
+                if(problem.empty()) problem = name + " is NVFP4 with a separate scale, which the engine does not apply yet";
+                return;
+            }
             out.type = t->type;
             out.cols = (int)t->dims[0];
             out.rows = (int)(t->elements / t->dims[0]);
@@ -1340,6 +1350,11 @@ struct GpuModel {
                 if(problem.empty()) problem = t
                     ? name + " is " + typeInfo(t->type).name + ", a tensor type the engine cannot read yet"
                     : "missing tensor " + name;
+                return nullptr;
+            }
+            // nvfp4 con una escala aparte: los expertos la aplican, en otro tensor las respuestas saldrian mal
+            if(t->type == 40 && name.find("_exps.") == std::string::npos && name.size() > 7 && findTensor(file, name.substr(0, name.size() - 7) + ".scale")){
+                if(problem.empty()) problem = name + " is NVFP4 with a separate scale per expert, which the engine does not apply yet";
                 return nullptr;
             }
             out.data = maps[t->file].base + t->offset;
@@ -1434,6 +1449,25 @@ struct GpuModel {
             L.expertGate.rows /= expertCount;
             L.expertUp.rows /= expertCount;
             L.expertDown.rows /= expertCount;
+            // nvfp4 trae la escala de cada experto en tensores aparte: gate antes del silu, up y down juntas en el peso de la ruta
+            const TensorInfo* scaleOf[3] = {findTensor(file, p + "ffn_gate_exps.scale"), findTensor(file, p + "ffn_up_exps.scale"), findTensor(file, p + "ffn_down_exps.scale")};
+            if(scaleOf[0] || scaleOf[1] || scaleOf[2]){
+                std::vector<float> part[3];
+                for(int k = 0; k < 3; k++){
+                    part[k].assign(expertCount, 1.0f);
+                    const TensorInfo* s = scaleOf[k];
+                    if(!s) continue;
+                    if(s->type != 0 || s->elements != (uint64_t)expertCount){
+                        if(problem.empty()) problem = p + "ffn_exps.scale has " + std::to_string(s->elements) + " values for " + std::to_string(expertCount) + " experts";
+                        continue;
+                    }
+                    memcpy(part[k].data(), maps[s->file].base + s->offset, 4ULL * expertCount);
+                }
+                L.gateScale = part[0];
+                L.routeFactor.resize(expertCount);
+                for(int e = 0; e < expertCount; e++) L.routeFactor[e] = part[1][e] * part[2][e];
+                expertScales = true;
+            }
         }
 
         if(!problem.empty()) return false;
@@ -1530,6 +1564,14 @@ struct GpuModel {
         uint64_t table = grab(blob.size());
         if(!table || cudaLink().copyUp(table, blob.data(), blob.size()) != 0) return false;
         tables = {table, table + 2048, table + 6144, table + 14336, table + 15360, table + 17408, table + 17536, table + 17552};
+        for(GpuLayer& L : layers){
+            if(L.gateScale.empty()) continue;
+            L.gateScaleOnGpu = grab(4ULL * expertCount);
+            L.routeFactorOnGpu = grab(4ULL * expertCount);
+            if(!L.gateScaleOnGpu || !L.routeFactorOnGpu) return false;
+            if(cudaLink().copyUp(L.gateScaleOnGpu, L.gateScale.data(), 4ULL * expertCount) != 0 || cudaLink().copyUp(L.routeFactorOnGpu, L.routeFactor.data(), 4ULL * expertCount) != 0) return false;
+        }
+        if(expertScales) std::cout << "NVFP4 experts with a scale per expert" << std::endl;
 
         for(auto& w : wanted) denseBytes += (w.first->bytes + 255) / 256 * 256;
 
@@ -1795,6 +1837,7 @@ struct GpuModel {
         uint64_t D = (uint64_t)expertsUsed * draftBatch;
         planWidth = std::max<uint64_t>(expertCount, (uint64_t)expertsUsed * std::max(std::max(relayLimit, promptRelay), 16));
         lists = grab(std::max(2 * S + 6 * planWidth, D + 6 * std::max<uint64_t>(expertCount, D)) * 4);
+        if(expertScales) gateRows = grab(S * 4);
         teamLists = grab(2 * teamSpan());
         expertGateOut = grab(B * expertWidth * 4);
         expertUpOut = grab(B * expertWidth * 4);
@@ -1843,6 +1886,7 @@ struct GpuModel {
         hostX = (float*)exchange(std::max(C, staged) * hidden * 4, mappedX);
         hostXRows = std::max(C, staged);
         hostLists = (int*)exchange((2 * spanH + 6 * expertCount) * 4, mappedLists);
+        if(expertScales) hostGateRows = (float*)exchange(spanH * 4, mappedGateRows);
         hostExpertOut = (float*)exchange(std::max(R, staged * expertsUsed) * hidden * 4, mappedExpertOut);
         hostExpertRows = std::max(R, staged * expertsUsed);
         hostLogits = (float*)exchange((uint64_t)verifyLimit * head.rows * 4, mappedLogits);
@@ -2120,7 +2164,11 @@ struct GpuModel {
         arriving.assign(layers.size() * expertCount, 0);
         uint64_t warmTable = grab((uint64_t)layers.size() * expertCount * 4);
         if(!warmTable) return false;
-        int helpPerLayer = openHelper(sizes + quantKernelSource + modelKernelSource, blob, perExpert, expertCount - held);
+        // la tarjeta ayudante calcula gate por up en un solo kernel sin la escala de cada experto de nvfp4
+        if(expertScales && useHelper) std::cout << "the helper card stays off: it does not apply the NVFP4 scale of each expert" << std::endl;
+        int helpPerLayer = expertScales
+            ? 0
+            : openHelper(sizes + quantKernelSource + modelKernelSource, blob, perExpert, expertCount - held);
         warmPerLayer = std::min(warmPerLayer, expertCount - held - helpPerLayer);
 
         // el ayudante toma los expertos que siguen a los de la tarjeta principal o los que quedan despues de la ram fijada
@@ -4168,6 +4216,7 @@ struct GpuModel {
                 {&embedRows, 0},
             };
             if(!blas) parts.push_back({&shared, T * hidden * 4});
+            if(expertScales) parts.push_back({&gateRows, S * 4});
         }
         if(W > 0){
             std::vector<std::pair<uint64_t*, uint64_t>> crest = {
@@ -4622,6 +4671,21 @@ struct GpuModel {
         return fine && !exact && L.warmBase[0] != 0;
     }
 
+    float gateScaleOf(const GpuLayer& L, int e) const {
+        return L.gateScale.empty()
+            ? 1.0f
+            : L.gateScale[e];
+    }
+
+    void scaleRoutes(const GpuLayer& L, int routes) {
+        if(L.routeFactorOnGpu) go("routeScale", (unsigned int)((routes + 255) / 256), 1, 256, 1, routeIds, routeWeights, L.routeFactorOnGpu, routes);
+    }
+
+    // las filas de gate de la gpu siguen la lista de cada ruta: se escalan antes del silu
+    void scaleGates(const GpuLayer& L, int n, int spillBase) {
+        if(L.gateScaleOnGpu) go("gateScaleRoutes", (unsigned int)(n * expertsUsed), 1, 128, 1, expertGateOut, lists, routeIds, L.gateScaleOnGpu, spillBase, expertWidth);
+    }
+
     void route(GpuLayer& L, int l, int n) {
         bool perLayer = n == 1 || relay;
         uint64_t idsOut = perLayer
@@ -4652,15 +4716,18 @@ struct GpuModel {
         if(copied && n == 1 && !ahead && expertCount % 32 == 0 && expertCount <= 1024){
             uint64_t flag = relay ? mappedFlags + 64 : 0;
             go("routePlan", 1, 1, 32, 1, routerOut, routeIds, routeWeights, idsOut, L.slots, warmUse, lists, plan, plan + 8ULL * expertCount, plan + 12ULL * expertCount, plan + 16ULL * expertCount, spillCounts + 4ULL * l, warmShare, tail, flag, mappedFlags, l);
+            scaleRoutes(L, n * expertsUsed);
             if(timing && relay) go("stampTime", 1, 1, 1, 1, mappedTimeline + 32ULL * l);
             return;
         }
         if(copied && relay && n > 1 && n <= 16 && !ahead && expertCount % 32 == 0 && expertCount <= 1024){
             go("routePlanBatch", 1, 1, 32 * n, 1, routerOut, routeIds, routeWeights, idsOut, L.slots, warmUse, n, warmShare, lists, plan, plan + 4ULL * planWidth, plan + 8ULL * planWidth, plan + 12ULL * planWidth, plan + 16ULL * planWidth, plan + 20ULL * planWidth, spillCounts + 4ULL * l, tail, mappedFlags + 64, mappedFlags, l, teamOn, warmTeamOn);
+            scaleRoutes(L, n * expertsUsed);
             if(timing) go("stampTime", 1, 1, 1, 1, mappedTimeline + 32ULL * l);
             return;
         }
         go("routeTop", (unsigned int)n, 1, expertCount, 1, routerOut, routeIds, routeWeights);
+        scaleRoutes(L, n * expertsUsed);
         go("copyWords", (unsigned int)((n * expertsUsed + 255) / 256), 1, 256, 1, routeIds, idsOut, n * expertsUsed);
         if(!copied) go("copyWords", (unsigned int)((n * hidden + 255) / 256), 1, 256, 1, x, xOut, n * hidden);
         if(n == 1) go("planExperts", 1, 1, 32, 1, routeIds, L.slots, warmUse, lists, plan, plan + 8ULL * expertCount, plan + 12ULL * expertCount, plan + 16ULL * expertCount, spillCounts + 4ULL * l, warmShare, routeWeights, tail);
@@ -5193,6 +5260,7 @@ struct GpuModel {
                 goShared(8 * stage, "rowsRouted", expertWidth / 8, (unsigned int)count, 256, 1, (int)L.expertGate.type, L.warmBase[0], L.expertGate.stride, gateSpan, warmSlotOnGpu, warmCountOnGpu, warmInputOnGpu, a.values, a.scales, a.sums, b.values, b.scales, b.sums, expertGateOut + shift, expertWidth, hidden, stage, tables);
                 goShared(8 * stage, "rowsRouted", expertWidth / 8, (unsigned int)count, 256, 1, (int)L.expertUp.type, L.warmBase[1], L.expertUp.stride, upSpan, warmSlotOnGpu, warmCountOnGpu, warmInputOnGpu, a.values, a.scales, a.sums, b.values, b.scales, b.sums, expertUpOut + shift, expertWidth, hidden, stage, tables);
             }
+            scaleGates(L, n, n == 1 || relay ? 2 * expertsUsed * n : cpuRows > 0 ? cpuBase : 1 << 30);
             swigluPack(expertGateOut, expertUpOut, expertHidden, 2 * count * expertWidth, 1);
             PackedInput& c = packs[1];
             PackedInput d = residual ? fines[1] : PackedInput();
@@ -5277,6 +5345,7 @@ struct GpuModel {
             go(tiled(L.expertGate.type, wide, e.values).c_str(), (expertWidth + rowTile(L.expertGate.type, wide, e.values) - 1) / rowTile(L.expertGate.type, wide, e.values), (unsigned int)(count * tiles), width == 128 ? 256 : 128, 1, (int)L.expertGate.type, L.resident[0], L.expertGate.stride, gateSpan, groupSlotOnGpu, groupStartOnGpu, groupCountOnGpu, inputOnGpu, a.values, a.scales, a.sums, e.values, e.scales, e.sums, expertGateOut, expertWidth, hidden, 0, tiles, none, none, none, tables);
             go(tiled(L.expertUp.type, wide, e.values).c_str(), (expertWidth + rowTile(L.expertUp.type, wide, e.values) - 1) / rowTile(L.expertUp.type, wide, e.values), (unsigned int)(count * tiles), width == 128 ? 256 : 128, 1, (int)L.expertUp.type, L.resident[1], L.expertUp.stride, upSpan, groupSlotOnGpu, groupStartOnGpu, groupCountOnGpu, inputOnGpu, a.values, a.scales, a.sums, e.values, e.scales, e.sums, expertUpOut, expertWidth, hidden, 0, tiles, none, none, none, tables);
         }
+        scaleGates(L, n, n == 1 || relay ? 2 * expertsUsed * n : cpuRows > 0 ? cpuBase : 1 << 30);
         swigluPack(expertGateOut, expertUpOut, expertHidden, rows * expertWidth, 1);
 
         PackedInput& c = packs[1];
@@ -5444,7 +5513,7 @@ struct GpuModel {
                 Matrix g = L.expertGate, up = L.expertUp;
                 g.data = copied ? L.warmHost[0] + (uint64_t)L.warm[e] * gateSpan : hostExpert(layer, 0, e, g.data + (uint64_t)e * gateSpan);
                 up.data = copied ? L.warmHost[1] + (uint64_t)L.warm[e] * upSpan : hostExpert(layer, 1, e, up.data + (uint64_t)e * upSpan);
-                work.push_back({g, &hostInput, i, cpuGate.data() + (size_t)i * expertWidth, k});
+                work.push_back({g, &hostInput, i, cpuGate.data() + (size_t)i * expertWidth, k, gateScaleOf(L, e)});
                 work.push_back({up, &hostInput, i, cpuUp.data() + (size_t)i * expertWidth, k});
                 i += k;
             }
@@ -5490,7 +5559,7 @@ struct GpuModel {
                 Matrix g = L.expertGate, up = L.expertUp;
                 g.data = copied ? L.warmHost[0] + (uint64_t)L.warm[e] * gateSpan : hostExpert(layer, 0, e, g.data + (uint64_t)e * gateSpan);
                 up.data = copied ? L.warmHost[1] + (uint64_t)L.warm[e] * upSpan : hostExpert(layer, 1, e, up.data + (uint64_t)e * upSpan);
-                work.push_back({g, &hostInput, 0, cpuGate.data() + (size_t)c * expertWidth, 1});
+                work.push_back({g, &hostInput, 0, cpuGate.data() + (size_t)c * expertWidth, 1, gateScaleOf(L, e)});
                 work.push_back({up, &hostInput, 0, cpuUp.data() + (size_t)c * expertWidth, 1});
             }
             hostMultiply(pool, work, residual);
@@ -5528,7 +5597,7 @@ struct GpuModel {
                 Matrix g = L.expertGate, up = L.expertUp;
                 g.data = copied ? L.warmHost[0] + (uint64_t)L.warm[e] * gateSpan : hostExpert(layer, 0, e, g.data + (uint64_t)e * gateSpan);
                 up.data = copied ? L.warmHost[1] + (uint64_t)L.warm[e] * upSpan : hostExpert(layer, 1, e, up.data + (uint64_t)e * upSpan);
-                work.push_back({g, &hostInput, start, cpuGate.data() + (size_t)start * expertWidth, expertTally[e]});
+                work.push_back({g, &hostInput, start, cpuGate.data() + (size_t)start * expertWidth, expertTally[e], gateScaleOf(L, e)});
                 work.push_back({up, &hostInput, start, cpuUp.data() + (size_t)start * expertWidth, expertTally[e]});
             }
             hostMultiply(pool, work, residual);
@@ -5556,7 +5625,7 @@ struct GpuModel {
             bool copied = L.warmHost[0] && L.warm[e] >= 0;
             g.data = copied ? L.warmHost[0] + (uint64_t)L.warm[e] * gateSpan : hostExpert(layer, 0, e, g.data + (uint64_t)e * gateSpan);
             up.data = copied ? L.warmHost[1] + (uint64_t)L.warm[e] * upSpan : hostExpert(layer, 1, e, up.data + (uint64_t)e * upSpan);
-            list.push_back({g, cpuInput.data() + (size_t)start * hidden, cpuGate.data() + (size_t)start * expertWidth, expertTally[e]});
+            list.push_back({g, cpuInput.data() + (size_t)start * hidden, cpuGate.data() + (size_t)start * expertWidth, expertTally[e], gateScaleOf(L, e)});
             list.push_back({up, cpuInput.data() + (size_t)start * hidden, cpuUp.data() + (size_t)start * expertWidth, expertTally[e]});
         }
         multiply(pool, list);
@@ -5633,6 +5702,7 @@ struct GpuModel {
         plain(L.router, x, hidden, routerOut, expertCount, n, 0);
         plain(L.sharedScalar, x, hidden, scalar, 1, n, 0);
         go("routeTop", (unsigned int)n, 1, expertCount, 1, routerOut, routeIds, routeWeights);
+        scaleRoutes(L, n * expertsUsed);
         phase = "shared";
         project(L.sharedGate, x, 0, sharedGateOut, n);
         project(L.sharedUp, x, 0, sharedUpOut, n);
@@ -5654,6 +5724,7 @@ struct GpuModel {
         plain(L.sharedScalar, x, hidden, scalar, 1, m, 0, L.router.cols != L.sharedScalar.cols);
         if(expertCount % 32 == 0 && expertCount <= 1024) go("routeWarp", (unsigned int)((m + 7) / 8), 1, 256, 1, picks, routeIds, routeWeights, m);
         else go("routeTop", (unsigned int)m, 1, expertCount, 1, picks, routeIds, routeWeights);
+        scaleRoutes(L, m * expertsUsed);
         wideRows = keptRows;
         wideRoom = keptRoom;
         phase = "experts";
@@ -5687,6 +5758,7 @@ struct GpuModel {
         PackedInput f = fine && residual && batchFine ? fines[0] : PackedInput();
         go(tiled(L.expertGate.type, wide, f.values).c_str(), (expertWidth + rowTile(L.expertGate.type, wide, f.values) - 1) / rowTile(L.expertGate.type, wide, f.values), (unsigned int)(b.groups * tiles), threads, 1, (int)L.expertGate.type, gate, L.expertGate.stride, gateBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, a.values, a.scales, a.sums, f.values, f.scales, f.sums, expertGateOut - rowShift, expertWidth, hidden, 0, tiles, none, none, none, tables);
         go(tiled(L.expertUp.type, wide, f.values).c_str(), (expertWidth + rowTile(L.expertUp.type, wide, f.values) - 1) / rowTile(L.expertUp.type, wide, f.values), (unsigned int)(b.groups * tiles), threads, 1, (int)L.expertUp.type, up, L.expertUp.stride, upBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, a.values, a.scales, a.sums, f.values, f.scales, f.sums, expertUpOut - rowShift, expertWidth, hidden, 0, tiles, none, none, none, tables);
+        if(L.gateScaleOnGpu) go("scaleRows", (unsigned int)rows, 1, 128, 1, expertGateOut, gateRows + 4ULL * b.rowStart, expertWidth);
         swigluPack(expertGateOut, expertUpOut, expertHidden, rows * expertWidth, 1);
 
         PackedInput& c = packs[1];
@@ -5830,7 +5902,7 @@ struct GpuModel {
             Matrix g = L.expertGate, up = L.expertUp;
             g.data = L.warmHost[0] + (uint64_t)L.warm[e] * gateSpan;
             up.data = L.warmHost[1] + (uint64_t)L.warm[e] * upSpan;
-            work.push_back({g, &hostInput, i, cpuGate.data() + (size_t)i * expertWidth, k});
+            work.push_back({g, &hostInput, i, cpuGate.data() + (size_t)i * expertWidth, k, gateScaleOf(L, e)});
             work.push_back({up, &hostInput, i, cpuUp.data() + (size_t)i * expertWidth, k});
             i += k;
         }
@@ -5924,6 +5996,7 @@ struct GpuModel {
             int a = expertBegin[hostIds[i]]++;
             input[a] = i / expertsUsed;
             weight[a] = hostWeights[i];
+            if(!L.gateScale.empty()) hostGateRows[a] = L.gateScale[hostIds[i]];
         }
         for(int e = 0; e < expertCount; e++) expertHits[(size_t)layer * expertCount + e] += expertTally[e];
         L.lastRouting.assign(hostIds + (size_t)(m - 1) * expertsUsed, hostIds + (size_t)m * expertsUsed);
@@ -5962,6 +6035,7 @@ struct GpuModel {
 
         int words = 2 * listSpan + 6 * expertCount;
         go("copyWords", (unsigned int)((words + 255) / 256), 1, 256, 1, mappedLists, lists, words);
+        if(L.gateScaleOnGpu) go("copyWords", (unsigned int)((cursor + 255) / 256), 1, 256, 1, mappedGateRows, gateRows, cursor);
         if(!wideHead){
             go("clearWords", (unsigned int)(((exactMix ? 2 : 1) * m * hidden + 255) / 256), 1, 256, 1, moeOut, (exactMix ? 2 : 1) * m * hidden);
             pack(x, m * hidden, 0);

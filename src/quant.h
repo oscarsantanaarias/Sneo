@@ -2,6 +2,7 @@
 #include "gguf.h"
 #include "quant_tables.h"
 #include <immintrin.h>
+#include <cmath>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -23,7 +24,7 @@ inline uint64_t rowBytes(uint32_t type, uint64_t elements) {
 inline bool knownType(uint32_t type) {
     switch(type){
         case 0: case 1: case 12: case 13: case 14: case 16: case 17: case 18:
-        case 7: case 8: case 20: case 21: case 22: case 23: case 29: case 30: case 42:
+        case 7: case 8: case 20: case 21: case 22: case 23: case 29: case 30: case 39: case 40: case 42:
             return true;
     }
     return false;
@@ -33,6 +34,36 @@ inline float half(const uint8_t* p) {
     uint16_t h;
     memcpy(&h, p, 2);
     return _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(h)));
+}
+
+// los valores fp4 (e2m1) van por 2 para que sean enteros: 0 0.5 1 1.5 2 3 4 6 pasan a 0 1 2 3 4 6 8 12
+alignas(16) inline const int8_t fp4Values[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12};
+
+// mxfp4: la escala es un exponente de 8 bits y ya va por la mitad para compensar los valores por 2
+inline float mxScale(uint8_t e) {
+    uint32_t bits = e < 2
+        ? 0x00200000u << e
+        : (uint32_t)(e - 1) << 23;
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
+
+// nvfp4: la escala de cada 16 valores es fp8 sin signo (4 de exponente y 3 de mantisa) y tambien va por la mitad
+inline float nvScale(uint8_t x) {
+    if(x == 0 || x == 0x7F) return 0.0f;
+    int e = (x >> 3) & 15, m = x & 7;
+    return e == 0
+        ? (float)m * 0.0009765625f
+        : (float)(8 + m) * ldexpf(1.0f, e - 11);
+}
+
+// n bytes de codigos fp4: los nibbles bajos son los primeros n valores y los altos los n siguientes
+inline void fp4Codes(const uint8_t* qs, int n, float scale, float* y) {
+    for(int j = 0; j < n; j++){
+        y[j] = (float)fp4Values[qs[j] & 15] * scale;
+        y[j + n] = (float)fp4Values[qs[j] >> 4] * scale;
+    }
 }
 
 // iq1_m guarda la escala del bloque en los 4 bits altos de sus cuatro escalas y va entre 8 porque grid1s va por 8
@@ -216,6 +247,14 @@ inline void dequantRow(uint32_t type, const uint8_t* src, float* out, int64_t co
 
             case 20:
                 nibbleBlock(q + 2, half(q), y);
+                break;
+
+            case 39:
+                fp4Codes(q + 1, 16, mxScale(q[0]), y);
+                break;
+
+            case 40:
+                for(int s = 0; s < 4; s++) fp4Codes(q + 4 + 8 * s, 8, nvScale(q[s]), y + 16 * s);
                 break;
 
             case 21: {
@@ -425,6 +464,7 @@ struct Product {
     const float* input = nullptr;
     float* output = nullptr;
     int count = 1;
+    float scale = 1.0f;
 };
 
 inline void multiply(ThreadPool& pool, const std::vector<Product>& list) {
@@ -448,7 +488,7 @@ inline void multiply(ThreadPool& pool, const std::vector<Product>& list) {
         for(int r = first[chunk]; r < end; r++){
             dequantRow(m.type, m.data + (uint64_t)r * m.stride, row, m.cols);
             for(int t = 0; t < job.count; t++){
-                job.output[(size_t)t * m.rows + r] = dot(row, job.input + (size_t)t * m.cols, m.cols);
+                job.output[(size_t)t * m.rows + r] = dot(row, job.input + (size_t)t * m.cols, m.cols) * job.scale;
             }
         }
     });

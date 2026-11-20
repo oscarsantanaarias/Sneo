@@ -68,7 +68,7 @@ router.get('/pool', async (req, res) => {
 });
 
 router.post('/pool', async (req, res) => {
-  const {slots, context, mainGpu, secondGpu, frontLayers, draftLength, speculate, copyReach, cpuPlan, warmShare, holdRam, ramWhole, pinShare, pinGb, vision, visionGpu} = req.body ?? {};
+  const {slots, context, mainGpu, secondGpu, helperGpu, helperGb, helperFirst, frontLayers, draftLength, speculate, copyReach, cpuPlan, warmShare, holdRam, ramWhole, pinShare, pinGb, vision, visionGpu} = req.body ?? {};
 
   if(slots !== undefined && !Array.isArray(slots)){
     return res.status(400).json({message: 'slots must be a list'});
@@ -90,6 +90,19 @@ router.post('/pool', async (req, res) => {
 
   if(secondGpu !== undefined){
     body.secondGpu = secondGpu === true;
+  }
+
+  // la tarjeta que ayuda, su tamano y el orden de sus expertos no llegaban al motor y volvian a 0 al guardar
+  if(helperGpu !== undefined && Number.isInteger(Number(helperGpu)) && Number(helperGpu) >= -1){
+    body.helperGpu = Number(helperGpu);
+  }
+
+  if(helperGb !== undefined && Number.isFinite(Number(helperGb)) && Number(helperGb) >= 0){
+    body.helperGb = Number(helperGb);
+  }
+
+  if(helperFirst !== undefined){
+    body.helperFirst = helperFirst === true;
   }
 
   if(frontLayers !== undefined && Number.isInteger(Number(frontLayers)) && Number(frontLayers) >= 0){

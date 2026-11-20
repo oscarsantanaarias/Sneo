@@ -2047,7 +2047,13 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     }
     std::vector<int> seen;
     if(!shown.empty() && (!brain.gpu || !brain.gpu->seeing)){
-        replyHttp(client, 400, problemJson(brain.gpu && !brain.gpu->visionProblem.empty() ? brain.gpu->visionProblem : "this model is loaded without Vision, turn on Vision in Settings to send pictures"));
+        // hy4 no tiene lector de imagenes: pedir que se prenda vision no sirve si ya esta prendido
+        std::string why = brain.gpu && brain.gpu->hy4
+            ? "Hy4-flash reads text only in Sneo, describe the picture in words or load a model that reads pictures (Qwen3.8-Flash-Next, Qwen3.6 or Gemma 4)"
+            : brain.gpu && !brain.gpu->visionProblem.empty()
+                ? brain.gpu->visionProblem
+                : "this model is loaded without Vision, turn on Vision in Settings to send pictures";
+        replyHttp(client, 400, problemJson(why));
         return;
     }
     for(const std::string& bytes : shown){

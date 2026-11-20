@@ -255,8 +255,13 @@ struct HyBuffers {
     uint64_t wideInValues = 0, wideInScales = 0, wideInSums = 0;
     uint64_t wideGate = 0, wideUp = 0, wideHid = 0, wideHidValues = 0, wideHidScales = 0, wideHidSums = 0;
     // relevo: con pocas filas el paso entero va en un grafo y la cpu atiende cada capa cuando la gpu le avisa por memoria compartida
-    // banderas como las del camino comun: [0] turno, [16] capa a la que llego la gpu, [32] capa que termino la cpu, [40] la que esta calculando, [48] alarma
+    // banderas como las del camino comun: [0] paso, [16] turno al que llego la gpu, [32] turno que termino la cpu, [40] el que esta calculando, [48] alarma
+    // cada capa tiene dos turnos, uno por mitad de filas: turno = 2 * capa + mitad
     int relayMax = 0, relayPairs = 0, relayTail = 0;
+    // mitades: la segunda mitad usa los buffers por fila corridos, su turno y su lugar en la copia de posiciones del indexador
+    int relayHalf = 0, snapAt = 0;
+    bool splitting = false, splitOn = false;
+    uint64_t splitSteps = 0;
     uint64_t relayDevIds = 0, relayDevWeights = 0, relayHits = 0, relaySpill = 0, slotMap = 0;
     uint64_t relayIds = 0, relayWeights = 0, relayCpu = 0, relayFlagsOn = 0;
     int* hostRelayIds = nullptr;
@@ -1479,6 +1484,30 @@ extern "C" __global__ void hyRelayScatter(const float* rows, const int* hits, in
     float w = weights[pair];
     float* dst = out + (u64)(pair / used) * latent;
     for(int c = threadIdx.x; c < latent; c += blockDim.x) atomicAdd(dst + c, w * rows[(u64)j * latent + c]);
+}
+
+// avisos del relevo con dos turnos por capa: el paso va por 128 para que entren los 84 turnos
+extern "C" __global__ void hyTell(volatile unsigned int* flag, const volatile unsigned int* ticket, int turn) {
+    __threadfence_system();
+    *flag = *ticket * 128u + (unsigned int)turn + 1u;
+    __threadfence_system();
+}
+
+// espera a la cpu en ese turno si tuvo expertos; si la cpu no contesta en 1.5 s (120 s si ya esta calculando) avisa y sigue
+extern "C" __global__ void hyAwait(const volatile unsigned int* flag, const volatile unsigned int* ticket, int turn, const int* spill, volatile unsigned int* alarm, const volatile unsigned int* working) {
+    if(*spill == 0) return;
+    unsigned int want = *ticket * 128u + (unsigned int)turn + 1u;
+    unsigned long long begin = globalNanos();
+    while(*flag < want){
+        unsigned long long limit = *working >= want ? 120000000000ull : 1500000000ull;
+        if(globalNanos() - begin > limit){
+            if(*alarm == 0u) *alarm = want;
+            __threadfence_system();
+            return;
+        }
+        __nanosleep(256);
+    }
+    __threadfence_system();
 }
 
 // lo de la cpu se suma solo si esa capa tuvo algo para ella: si no la memoria compartida tiene lo de otra capa

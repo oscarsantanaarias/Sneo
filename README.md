@@ -40,7 +40,7 @@ Made by Oscar Santana, a developer from the Dominican Republic: [LinkedIn](https
 | Gemma 4 31B | Dense | 17 GB | `gemma4:31b` in Ollama, its draft assistant comes along and makes writing faster |
 | Hy4-flash Q4_K_M (preview) | Tencent, 512 experts, 12B active | 157 GB | [AngelSlim/Hy4-flash-GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF), see [Hy4-flash](#hy4-flash-preview) |
 
-The same models as GGUF files from Hugging Face load too, and so do other quantizations of them, as long as their tensors are of these types: IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q2_0, Q4_K, Q5_K, Q5_1, Q6_K, Q8_0, F16, BF16 and F32 (for example the usual Q4_K_M, Q5_K_M, Q6_K and Q8_0 files).
+The same models as GGUF files from Hugging Face load too, and so do other quantizations of them, as long as their tensors are of these types: IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q2_0, Q4_K, Q5_K, Q5_1, Q6_K, Q8_0, NVFP4, MXFP4, F16, BF16 and F32 (for example the usual Q4_K_M, Q5_K_M, Q6_K and Q8_0 files, and the NVFP4 ones that keep a scale per expert).
 
 All of them are free. **Get models** in the model menu downloads Qwen3.8-Flash-Next and Qwen3.6-35B-A3B from Hugging Face and marks the one that fits the PC best. A model of another architecture still shows up in the list, and loading it says that it is not supported yet.
 

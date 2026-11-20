@@ -88,7 +88,7 @@ inline void hostSwiglu(float* gate, const float* up, size_t count) {
 }
 
 inline bool hostDotType(uint32_t type) {
-    return type == 16 || type == 17 || type == 18 || type == 20 || type == 21 || type == 22 || type == 42 || type == 23 || type == 8 || type == 7 || type == 12 || type == 13 || type == 14 || type == 29;
+    return type == 16 || type == 17 || type == 18 || type == 20 || type == 21 || type == 22 || type == 42 || type == 23 || type == 8 || type == 7 || type == 12 || type == 13 || type == 14 || type == 29 || type == 39 || type == 40;
 }
 
 inline __m256i bitBytes(uint32_t bits) {
@@ -224,6 +224,30 @@ inline void groupCodes(const uint8_t* block, int g, float base, __m256i& mag, __
         mag = _mm256_sign_epi8(w, w);
         sign = w;
         scale = _mm256_set1_ps(base);
+    } else if constexpr(TYPE == 39){
+        const __m128i table = _mm_load_si128((const __m128i*)fp4Values);
+        const __m128i mask = _mm_set1_epi8(15);
+        __m128i raw = _mm_loadu_si128((const __m128i*)(block + 1));
+        __m128i lo = _mm_shuffle_epi8(table, _mm_and_si128(raw, mask));
+        __m128i hi = _mm_shuffle_epi8(table, _mm_and_si128(_mm_srli_epi16(raw, 4), mask));
+        __m256i w = _mm256_set_m128i(hi, lo);
+        mag = _mm256_sign_epi8(w, w);
+        sign = w;
+        scale = _mm256_set1_ps(base);
+    } else if constexpr(TYPE == 40){
+        // cada mitad de 16 es un sub bloque: 8 bytes con los valores 0..7 en los nibbles bajos y 8..15 en los altos
+        const __m128i table = _mm_load_si128((const __m128i*)fp4Values);
+        const __m128i mask = _mm_set1_epi8(15);
+        __m128i halves[2];
+        for(int s = 0; s < 2; s++){
+            __m128i raw = _mm_loadl_epi64((const __m128i*)(block + 4 + 8 * (2 * g + s)));
+            __m128i codes = _mm_unpacklo_epi64(_mm_and_si128(raw, mask), _mm_and_si128(_mm_srli_epi16(raw, 4), mask));
+            halves[s] = _mm_shuffle_epi8(table, codes);
+        }
+        __m256i w = _mm256_set_m128i(halves[1], halves[0]);
+        mag = _mm256_sign_epi8(w, w);
+        sign = w;
+        scale = _mm256_insertf128_ps(_mm256_castps128_ps256(_mm_set1_ps(nvScale(block[2 * g]))), _mm_set1_ps(nvScale(block[2 * g + 1])), 1);
     } else if constexpr(TYPE == 29){
         const uint8_t* qs = block + 4 * g;
         const uint8_t* qh = block + 32 + 2 * g;
@@ -286,9 +310,9 @@ inline __m256i byteDots(__m256i mag, __m256i x) {
 
 template<int TYPE, bool RESIDUAL, int COUNT, bool VNNI>
 inline void rowDots(const uint8_t* row, int cols, const HostPacked& in, size_t at, float* out, size_t outStep) {
-    constexpr int span = TYPE == 20 || TYPE == 8 || TYPE == 7
+    constexpr int span = TYPE == 20 || TYPE == 8 || TYPE == 7 || TYPE == 39
         ? 32
-        : TYPE == 42
+        : TYPE == 42 || TYPE == 40
             ? 64
             : 256;
     constexpr int perBlock = span / 32;
@@ -316,7 +340,11 @@ inline void rowDots(const uint8_t* row, int cols, const HostPacked& in, size_t a
                                                 ? 24
                                                 : TYPE == 29
                                                     ? 56
-                                                    : 18;
+                                                    : TYPE == 39
+                                                        ? 17
+                                                        : TYPE == 40
+                                                            ? 36
+                                                            : 18;
     constexpr bool lowered = TYPE == 12 || TYPE == 13 || TYPE == 7;
     __m256 even[COUNT], odd[COUNT];
     float minus[COUNT];
@@ -353,18 +381,25 @@ inline void rowDots(const uint8_t* row, int cols, const HostPacked& in, size_t a
     size_t blocks = (size_t)(cols / span);
     if constexpr(perBlock == 1){
         size_t b = 0;
+        auto base = [](const uint8_t* block) {
+            return TYPE == 39
+                ? mxScale(block[0])
+                : half(block);
+        };
         for(; b + 1 < blocks; b += 2){
             const uint8_t* block = row + b * bytes;
-            group(block, 0, half(block), b, even);
-            group(block + bytes, 0, half(block + bytes), b + 1, odd);
+            group(block, 0, base(block), b, even);
+            group(block + bytes, 0, base(block + bytes), b + 1, odd);
         }
-        if(b < blocks) group(row + b * bytes, 0, half(row + b * bytes), b, even);
+        if(b < blocks) group(row + b * bytes, 0, base(row + b * bytes), b, even);
     } else {
         for(size_t b = 0; b < blocks; b++){
             const uint8_t* block = row + b * bytes;
             float base = TYPE == 29
                 ? grid1Scale(block)
-                : half(TYPE == 14 ? block + 208 : block);
+                : TYPE == 40
+                    ? 1.0f
+                    : half(TYPE == 14 ? block + 208 : block);
             for(int g = 0; g < perBlock; g += 2){
                 group(block, g, base, b * perBlock + g, even);
                 group(block, g + 1, base, b * perBlock + g + 1, odd);
@@ -501,6 +536,7 @@ struct HostProduct {
     int first = 0;
     float* output = nullptr;
     int count = 1;
+    float scale = 1.0f;
 };
 
 template<int TYPE, bool RESIDUAL, bool VNNI>
@@ -522,6 +558,9 @@ inline void productRows(const HostProduct& job, int start, int end) {
                 case 2: dotsOf<TYPE, RESIDUAL, 2, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
                 default: dotsOf<TYPE, RESIDUAL, 1, VNNI>(line, m.cols, *job.input, at, out, (size_t)m.rows); break;
             }
+            if(job.scale != 1.0f){
+                for(int j = 0; j < left; j++) out[(size_t)j * m.rows] *= job.scale;
+            }
         }
     }
 }
@@ -542,6 +581,8 @@ inline void productRowsOf(const HostProduct& job, int first, int end) {
         case 13: productRows<13, RESIDUAL, VNNI>(job, first, end); break;
         case 14: productRows<14, RESIDUAL, VNNI>(job, first, end); break;
         case 29: productRows<29, RESIDUAL, VNNI>(job, first, end); break;
+        case 39: productRows<39, RESIDUAL, VNNI>(job, first, end); break;
+        case 40: productRows<40, RESIDUAL, VNNI>(job, first, end); break;
         default: productRows<42, RESIDUAL, VNNI>(job, first, end); break;
     }
 }

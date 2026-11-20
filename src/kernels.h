@@ -124,6 +124,31 @@ __device__ float groupGrid4(u32 grid, u8 signs, int shift, float scale, const fl
     return sum * scale;
 }
 
+// cuatro codigos fp4 (uno en los 4 bits bajos de cada byte) a cuatro bytes con signo: 0 1 2 3 4 6 8 12 y sus negativos
+__device__ __forceinline__ int fp4Bytes(u32 nibbles) {
+    u32 pick = (nibbles & 7u) | ((nibbles >> 4) & 0x70u) | ((nibbles >> 8) & 0x700u) | ((nibbles >> 12) & 0x7000u);
+    u32 magnitude = __byte_perm(0x03020100u, 0x0C080604u, pick);
+    u32 negative = ((nibbles & 0x08080808u) >> 3) * 0xFFu;
+    return (int)__vsub4(magnitude ^ negative, negative);
+}
+
+// mxfp4: exponente de 8 bits ya por la mitad porque los valores van por 2
+__device__ __forceinline__ float mxScale(u8 e) {
+    return __uint_as_float(e < 2
+        ? 0x00200000u << e
+        : (u32)(e - 1) << 23);
+}
+
+// nvfp4: fp8 sin signo (4 de exponente y 3 de mantisa) por cada 16 valores, tambien por la mitad
+__device__ __forceinline__ float nvScale(u8 x) {
+    int e = (x >> 3) & 15, m = x & 7;
+    return x == 0 || x == 0x7F
+        ? 0.0f
+        : e == 0
+            ? (float)m * 0.0009765625f
+            : (float)(8 + m) * __uint_as_float((u32)(e + 116) << 23);
+}
+
 __device__ float dotGroup(int type, const u8* block, int g, const float* x, const GridTables& t) {
     if(type == 0){
         const float* w = (const float*)block + 32 * g;
@@ -183,6 +208,30 @@ __device__ float dotGroup(int type, const u8* block, int g, const float* x, cons
             sum += (float)sc[2 * k + l / 16] * (float)((low | (high << 4)) - 32) * x[l];
         }
         return d * sum;
+    }
+
+    if(type == 39){
+        float sum = 0.0f;
+        for(int j = 0; j < 16; j++){
+            int pair = fp4Bytes((u32)(block[1 + j] & 15) | ((u32)(block[1 + j] >> 4) << 8));
+            sum += (float)(i8)pair * x[j] + (float)(i8)(pair >> 8) * x[j + 16];
+        }
+        return mxScale(block[0]) * sum;
+    }
+
+    if(type == 40){
+        float total = 0.0f;
+        for(int s = 0; s < 2; s++){
+            const u8* qs = block + 4 + 8 * (2 * g + s);
+            const float* xs = x + 16 * s;
+            float sum = 0.0f;
+            for(int j = 0; j < 8; j++){
+                int pair = fp4Bytes((u32)(qs[j] & 15) | ((u32)(qs[j] >> 4) << 8));
+                sum += (float)(i8)pair * xs[j] + (float)(i8)(pair >> 8) * xs[j + 8];
+            }
+            total += nvScale(block[2 * g + s]) * sum;
+        }
+        return total;
     }
 
     if(type == 20 || type == 23){
@@ -321,7 +370,7 @@ __device__ float dotGroup(int type, const u8* block, int g, const float* x, cons
 }
 
 __device__ __forceinline__ int groupsPerBlock(int type) {
-    return type == 0 || type == 1 || type == 30 || type == 20 || type == 7 || type == 8 ? 1 : type == 42 ? 2 : 8;
+    return type == 0 || type == 1 || type == 30 || type == 20 || type == 7 || type == 8 || type == 39 ? 1 : type == 42 || type == 40 ? 2 : 8;
 }
 
 __device__ __forceinline__ int blockBytes(int type) {
@@ -342,6 +391,8 @@ __device__ __forceinline__ int blockBytes(int type) {
         case 22: return 82;
         case 23: return 136;
         case 29: return 56;
+        case 39: return 17;
+        case 40: return 36;
         case 42: return 18;
     }
     return 0;
@@ -419,6 +470,33 @@ __device__ float dotGroupQ8(int type, const u8* block, int g, const int* q, floa
             sum = __dp4a(table4(t.iq4nl, (raw >> 4) & 0x0F0F0F0Fu), q[i + 4], sum);
         }
         return d * dx * sum;
+    }
+
+    if(type == 39){
+        int sum = 0;
+        #pragma unroll
+        for(int i = 0; i < 4; i++){
+            u32 raw = load32(block + 1 + 4 * i);
+            sum = __dp4a(fp4Bytes(raw & 0x0F0F0F0Fu), q[i], sum);
+            sum = __dp4a(fp4Bytes((raw >> 4) & 0x0F0F0F0Fu), q[i + 4], sum);
+        }
+        return mxScale(block[0]) * dx * sum;
+    }
+
+    // nvfp4: cada mitad de 16 tiene su escala; en ella los nibbles bajos son los valores 0..7 y los altos 8..15
+    if(type == 40){
+        float total = 0.0f;
+        #pragma unroll
+        for(int s = 0; s < 2; s++){
+            const u8* qs = block + 4 + 8 * (2 * g + s);
+            u32 a = load32(qs), b = load32(qs + 4);
+            int sum = __dp4a(fp4Bytes(a & 0x0F0F0F0Fu), q[4 * s], 0);
+            sum = __dp4a(fp4Bytes(b & 0x0F0F0F0Fu), q[4 * s + 1], sum);
+            sum = __dp4a(fp4Bytes((a >> 4) & 0x0F0F0F0Fu), q[4 * s + 2], sum);
+            sum = __dp4a(fp4Bytes((b >> 4) & 0x0F0F0F0Fu), q[4 * s + 3], sum);
+            total += nvScale(block[2 * g + s]) * (float)sum;
+        }
+        return dx * total;
     }
 
     if(type == 42){

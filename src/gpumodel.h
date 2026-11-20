@@ -3,6 +3,7 @@
 #include "qwen4.h"
 #include "gpukernels.h"
 #include "volta.h"
+#include "fp4.h"
 #include "hostdot.h"
 #include "pack.h"
 #include "split.h"
@@ -502,6 +503,9 @@ struct GpuModel {
     uint64_t splitScratch = 0;
     float* hostWeights = nullptr;
     bool expertScales = false;
+    bool fp4Tensor = false;
+    KernelModule fp4Module;
+    uint64_t fp4Codes = 0, fp4Scales = 0, fp4TokenScale = 0;
     uint64_t gateRows = 0, mappedGateRows = 0;
     float* hostGateRows = nullptr;
     uint64_t mappedWeights = 0;
@@ -727,7 +731,9 @@ struct GpuModel {
     }
 
     void start(const char* name, unsigned int gridX, unsigned int gridY, unsigned int blockX, unsigned int blockY, unsigned int shared, void** args) {
-        void* fn = kernelFunction(module, name);
+        void* fn = fp4Tensor && name[0] == 'f' && name[1] == 'p' && name[2] == '4'
+            ? kernelFunction(fp4Module, name)
+            : kernelFunction(module, name);
         // mas de 48 KB de memoria compartida hay que pedirlo una vez por kernel
         if(fn && shared > 48 * 1024 && !widerShared.count(fn)){
             if(cudaLink().funcAttribute) cudaLink().funcAttribute(fn, 8, (int)shared);
@@ -1578,6 +1584,21 @@ struct GpuModel {
             if(cudaLink().copyUp(L.gateScaleOnGpu, L.gateScale.data(), 4ULL * expertCount) != 0 || cudaLink().copyUp(L.routeFactorOnGpu, L.routeFactor.data(), 4ULL * expertCount) != 0) return false;
         }
         if(expertScales) std::cout << "NVFP4 experts with a scale per expert" << std::endl;
+        // las rtx 50 leen el prompt con gate y up de los expertos nvfp4 en sus tensor cores fp4; SNEO_FP4_TENSOR=0 lo apaga y =1 lo fuerza para probarlo
+        bool nvExperts = false;
+        for(const GpuLayer& L : layers) nvExperts = nvExperts || L.expertGate.type == 40 || L.expertUp.type == 40;
+        char fp4Text[8] = {};
+        bool fp4Asked = GetEnvironmentVariableA("SNEO_FP4_TENSOR", fp4Text, sizeof(fp4Text)) > 0;
+        bool rtx50 = cudaLink().major == 12 && cudaLink().minor == 0;
+        fp4Tensor = nvExperts && !amdCards && hidden % 64 == 0 && (fp4Asked
+            ? fp4Text[0] == '1'
+            : rtx50);
+        if(fp4Tensor){
+            std::string fp4Log;
+            std::string code = compileCode(fp4KernelSource, rtx50 ? "sm_120a" : "sm_" + std::to_string(cudaLink().major) + std::to_string(cudaLink().minor), fp4Log);
+            fp4Tensor = !code.empty() && cudaLink().moduleLoad(&fp4Module.module, code.data()) == 0;
+            std::cout << (fp4Tensor ? "prompt experts on the fp4 tensor cores" : "the fp4 tensor core kernels did not build, prompt experts stay on int8: " + fp4Log.substr(0, 300)) << std::endl;
+        }
 
         for(auto& w : wanted) denseBytes += (w.first->bytes + 255) / 256 * 256;
 
@@ -1844,6 +1865,11 @@ struct GpuModel {
         planWidth = std::max<uint64_t>(expertCount, (uint64_t)expertsUsed * std::max(std::max(relayLimit, promptRelay), 16));
         lists = grab(std::max(2 * S + 6 * planWidth, D + 6 * std::max<uint64_t>(expertCount, D)) * 4);
         if(expertScales) gateRows = grab(S * 4);
+        if(fp4Tensor){
+            fp4Codes = grab(T * hidden / 2);
+            fp4Scales = grab(T * hidden / 16);
+            fp4TokenScale = grab(T * 4);
+        }
         teamLists = grab(2 * teamSpan());
         expertGateOut = grab(B * expertWidth * 4);
         expertUpOut = grab(B * expertWidth * 4);
@@ -4241,6 +4267,11 @@ struct GpuModel {
             };
             if(!blas) parts.push_back({&shared, T * hidden * 4});
             if(expertScales) parts.push_back({&gateRows, S * 4});
+            if(fp4Tensor){
+                parts.push_back({&fp4Codes, T * hidden / 2});
+                parts.push_back({&fp4Scales, T * hidden / 16});
+                parts.push_back({&fp4TokenScale, T * 4});
+            }
         }
         if(W > 0){
             std::vector<std::pair<uint64_t*, uint64_t>> crest = {
@@ -5780,8 +5811,12 @@ struct GpuModel {
         uint64_t none = 0;
         PackedInput& a = packs[0];
         PackedInput f = fine && residual && batchFine ? fines[0] : PackedInput();
-        go(tiled(L.expertGate.type, wide, f.values).c_str(), (expertWidth + rowTile(L.expertGate.type, wide, f.values) - 1) / rowTile(L.expertGate.type, wide, f.values), (unsigned int)(b.groups * tiles), threads, 1, (int)L.expertGate.type, gate, L.expertGate.stride, gateBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, a.values, a.scales, a.sums, f.values, f.scales, f.sums, expertGateOut - rowShift, expertWidth, hidden, 0, tiles, none, none, none, tables);
-        go(tiled(L.expertUp.type, wide, f.values).c_str(), (expertWidth + rowTile(L.expertUp.type, wide, f.values) - 1) / rowTile(L.expertUp.type, wide, f.values), (unsigned int)(b.groups * tiles), threads, 1, (int)L.expertUp.type, up, L.expertUp.stride, upBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, a.values, a.scales, a.sums, f.values, f.scales, f.sums, expertUpOut - rowShift, expertWidth, hidden, 0, tiles, none, none, none, tables);
+        // en las rtx 50 gate y up nvfp4 van por los tensor cores fp4 con las activaciones pasadas a fp4
+        unsigned int fp4Tiles = (unsigned int)((b.widest + 63) / 64);
+        if(fp4Tensor && L.expertGate.type == 40) go("fp4Rows", (unsigned int)((expertWidth + 63) / 64), (unsigned int)(b.groups * fp4Tiles), 128, 1, gate, L.expertGate.stride, gateBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, fp4Codes, fp4Scales, fp4TokenScale, expertGateOut - rowShift, expertWidth, hidden, (int)fp4Tiles);
+        else go(tiled(L.expertGate.type, wide, f.values).c_str(), (expertWidth + rowTile(L.expertGate.type, wide, f.values) - 1) / rowTile(L.expertGate.type, wide, f.values), (unsigned int)(b.groups * tiles), threads, 1, (int)L.expertGate.type, gate, L.expertGate.stride, gateBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, a.values, a.scales, a.sums, f.values, f.scales, f.sums, expertGateOut - rowShift, expertWidth, hidden, 0, tiles, none, none, none, tables);
+        if(fp4Tensor && L.expertUp.type == 40) go("fp4Rows", (unsigned int)((expertWidth + 63) / 64), (unsigned int)(b.groups * fp4Tiles), 128, 1, up, L.expertUp.stride, upBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, fp4Codes, fp4Scales, fp4TokenScale, expertUpOut - rowShift, expertWidth, hidden, (int)fp4Tiles);
+        else go(tiled(L.expertUp.type, wide, f.values).c_str(), (expertWidth + rowTile(L.expertUp.type, wide, f.values) - 1) / rowTile(L.expertUp.type, wide, f.values), (unsigned int)(b.groups * tiles), threads, 1, (int)L.expertUp.type, up, L.expertUp.stride, upBytes, slotOnGpu + shift, startOnGpu + shift, countOnGpu + shift, inputOnGpu, a.values, a.scales, a.sums, f.values, f.scales, f.sums, expertUpOut - rowShift, expertWidth, hidden, 0, tiles, none, none, none, tables);
         if(L.gateScaleOnGpu) go("scaleRows", (unsigned int)rows, 1, 128, 1, expertGateOut, gateRows + 4ULL * b.rowStart, expertWidth);
         swigluPack(expertGateOut, expertUpOut, expertHidden, rows * expertWidth, 1);
 
@@ -5950,6 +5985,8 @@ struct GpuModel {
     void moePass(GpuLayer& L, int layer, int m) {
         CudaQueue& queue = cudaQueue();
         int routes = m * expertsUsed;
+        // antes de sharedAll: con wideHead la salida del experto compartido se escribe encima de x
+        if(fp4Tensor) go("fp4Pack", (unsigned int)m, 1, 256, 1, x, fp4Codes, fp4Scales, fp4TokenScale, hidden);
         bool coldOn = layer < (int)coldPlan.size() && !coldPlan[layer].empty();
         if(coldOn && queue.copyDown(hostExpertOut, x, (size_t)m * hidden * 4, stream) != 0) failed = true;
         go("copyWords", (unsigned int)((routes + 255) / 256), 1, 256, 1, routeIds, mappedIds, routes);

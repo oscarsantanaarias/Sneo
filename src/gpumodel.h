@@ -2,6 +2,7 @@
 #include "platform.h"
 #include "qwen4.h"
 #include "gpukernels.h"
+#include "volta.h"
 #include "hostdot.h"
 #include "pack.h"
 #include "split.h"
@@ -546,6 +547,7 @@ struct GpuModel {
     bool groupAttention = true;
     bool mmaAttention = true;
     bool intAttention = true;
+    bool voltaAttention = false;
     bool mixUp = true;
     bool tileScores = true;
     bool useBlas = true;
@@ -1170,6 +1172,14 @@ struct GpuModel {
             }
         }
         legacy = legacy || cudaLink().major < 8;
+        // la v100 (sm_70 y sm_72) lee el prompt con sus propios tensor cores en volta.h
+        // SNEO_VOLTA_ATTENTION=1 lo fuerza en otra nvidia para probarlo y =0 lo apaga
+        char voltaText[8] = {};
+        bool voltaAsked = GetEnvironmentVariableA("SNEO_VOLTA_ATTENTION", voltaText, sizeof(voltaText)) > 0;
+        voltaAttention = !amdCards && cudaLink().major >= 7 && (voltaAsked
+            ? voltaText[0] == '1'
+            : cudaLink().major == 7 && cudaLink().minor < 5);
+        if(voltaAttention) std::cout << "prompt attention on the volta tensor cores" << std::endl;
 #ifndef _WIN32
         // wsl deja fijar poco mas de 1 GB de ram para la tarjeta: los anillos que suben expertos al leer el prompt van con dos lados
         if(access("/dev/dxg", F_OK) == 0){
@@ -1210,7 +1220,7 @@ struct GpuModel {
             + "\n#define EXACT_MIX " + std::string(exactMix ? "1" : "0")
             + "\n#define SILU_NORM " + std::string(file.arch != "qwen4exp" ? "1" : "0") + "\n";
         loadSay("Building the GPU kernels");
-        if(!buildModule(sizes + quantKernelSource + modelKernelSource, module)){
+        if(!buildModule(sizes + quantKernelSource + modelKernelSource + (voltaAttention ? voltaKernelSource : ""), module)){
             problem = "kernel build failed: " + module.log;
             return false;
         }
@@ -3322,7 +3332,9 @@ struct GpuModel {
             int rowsPer = kvHeads > 0 ? queryHeads / kvHeads : 16;
             int pack = packedAttention && rowsPer < 16 ? 16 / rowsPer : 1;
             bool tensor = intAttention && mmaAttention && !legacy && !amdCards && !fixed && n >= 32 && kvHeads > 0 && queryHeads <= 16 * kvHeads && headWidth == 256;
-            if(tensor && pack > 1) go("attentionIntPacked", kvHeads, (unsigned int)((n + pack - 1) / pack), 128, 1, q, L.keys, keyScales, L.values, valueScales, positionsOnGpu, o, n);
+            bool volta = voltaAttention && !fixed && n >= 32 && kvHeads > 0 && queryHeads <= 16 * kvHeads && headWidth == 256;
+            if(volta) go("attentionVolta", kvHeads, (unsigned int)n, 128, 1, q, L.keys, keyScales, L.values, valueScales, cells, positionsOnGpu, o, budget);
+            else if(tensor && pack > 1) go("attentionIntPacked", kvHeads, (unsigned int)((n + pack - 1) / pack), 128, 1, q, L.keys, keyScales, L.values, valueScales, positionsOnGpu, o, n);
             else if(tensor) go("attentionInt", kvHeads, (unsigned int)n, 128, 1, q, L.keys, keyScales, L.values, valueScales, cells, positionsOnGpu, o, budget);
             else go("attentionTiles", kvHeads, (unsigned int)tiles, 256, 1, q, L.keys, keyScales, L.values, valueScales, positionsOnGpu, o, n);
         }
@@ -3331,6 +3343,7 @@ struct GpuModel {
             go("attentionSplit", queryHeads, (unsigned int)(n * splits), 256, 1, q, L.keys, keyScales, L.values, valueScales, cells, positionsOnGpu, splitScratch, budget, splits);
             go("attentionMerge", queryHeads, (unsigned int)n, 256, 1, q, splitScratch, o, splits);
         }
+        else if(voltaAttention && n >= 32 && kvHeads > 0 && queryHeads <= 16 * kvHeads && headWidth == 256) go("attentionVolta", kvHeads, (unsigned int)n, 128, 1, q, L.keys, keyScales, L.values, valueScales, cells, positionsOnGpu, o, budget);
         else if(mmaAttention && !legacy && !amdCards && n >= 32 && kvHeads > 0 && queryHeads <= 16 * kvHeads && headWidth == 256) go(intAttention ? "attentionInt" : "attentionMma", kvHeads, (unsigned int)n, 128, 1, q, L.keys, keyScales, L.values, valueScales, cells, positionsOnGpu, o, budget);
         else if(groupAttention && n >= 32 && kvHeads > 0 && queryHeads <= 24 * kvHeads) go("attentionGroup", kvHeads, (unsigned int)n, 256, 1, q, L.keys, keyScales, L.values, valueScales, cells, positionsOnGpu, o, budget);
         else go("attention", queryHeads, (unsigned int)n, 256, 1, q, L.keys, keyScales, L.values, valueScales, cells, positionsOnGpu, o, budget);

@@ -3,6 +3,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { askClaude, claudeModels } from './claude.js';
 import { askClaudeCode, claudeCodeModels } from './claudecode.js';
+import { askAntigravity } from './antigravity.js';
 import { paths } from './config.js';
 import { askPlain } from './model.js';
 import { cleanText } from './storage.js';
@@ -20,19 +21,21 @@ export const routePresets = [
   {kind: 'openai', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', model: '', parallel: 4},
   {kind: 'openai', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', model: '', parallel: 4},
   {kind: 'claudecode', name: 'Claude Code (your subscription)', baseUrl: '', model: '', parallel: 1},
-  {kind: 'openai', name: 'Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-flash-latest', parallel: 4}
+  {kind: 'openai', name: 'Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-flash-latest', parallel: 4},
+  {kind: 'agy', name: 'Antigravity (your Google account)', baseUrl: '', model: '', parallel: 1}
 ];
 
 const cleanRoute = (item, kept = {}) => {
-  const kind = ['local', 'claude', 'claudecode', 'openai'].includes(item?.kind) ? item.kind : 'openai';
+  const kind = ['local', 'claude', 'claudecode', 'agy', 'openai'].includes(item?.kind) ? item.kind : 'openai';
   const key = item?.apiKey === '***' ? kept.apiKey || '' : cleanText(item?.apiKey);
+  const account = kind === 'claudecode' || kind === 'agy';
 
   return {
     id: cleanText(item?.id) || crypto.randomUUID(),
     kind,
     name: cleanText(item?.name).slice(0, 60) || 'Route',
-    baseUrl: kind === 'claude' || kind === 'claudecode' ? '' : cleanText(item?.baseUrl).replace(/\/+$/, ''),
-    apiKey: kind === 'local' || kind === 'claudecode' ? '' : key,
+    baseUrl: kind === 'claude' || account ? '' : cleanText(item?.baseUrl).replace(/\/+$/, ''),
+    apiKey: kind === 'local' || account ? '' : key,
     model: cleanText(item?.model).slice(0, 120),
     effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(item?.effort) ? item.effort : 'medium',
     parallel: Math.min(16, Math.max(1, parseInt(item?.parallel, 10) || (kind === 'local' ? 1 : 4)))
@@ -113,6 +116,10 @@ export const askRoute = async (route, messages, tools, run) => {
 
   if(route.kind === 'claudecode'){
     return await askClaudeCode(route, messages, tools, run);
+  }
+
+  if(route.kind === 'agy'){
+    return await askAntigravity(route, messages, tools, run);
   }
 
   return await askPlain(route, messages, tools, run);
@@ -252,7 +259,7 @@ export const chatAgent = async ({agent, route, history, project, peers = [], rou
     const last = past.pop();
     const writer = clean.edits
       ? ' You are the one who changes the code: apply fixes yourself in the project files. Use replace_in_file with the exact text to change for edits, write_file only for new files, and run the code with sandbox_run or run_command to check it works. Never ask another agent to apply a change you can make, and say which files and lines you changed.'
-      : ' You can only read the project. When something must change, describe the exact change and hand it to the agent that edits code.';
+      : ' You can only read the project. When something must change, describe the exact change and hand it to the agent that edits code. To review changes start with git_diff and read a whole file only when the diff does not show enough.';
     const result = await withSlot(route, () => runWorker({name: clean.name, role: clean.focus || clean.name, task: last.content, project, route, run, onStep, history: past, persona: persona + writer, rounds, canEdit: clean.edits}));
     return {content: dropThinking(result.answer), tools: (result.tools || []).map(item => item.tool), thinking: ''};
   }

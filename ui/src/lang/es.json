@@ -949,5 +949,8 @@
   "Waiting for your approval": "Esperando tu aprobación",
   "See the change": "Ver el cambio",
   "Ask": "Preguntar",
-  "What agents that change code may do: Auto changes files and runs commands alone, Ask waits for your approval on each change, Plan only reads": "Lo que pueden hacer los agentes que cambian código: Auto cambia archivos y corre comandos solo, Preguntar espera tu aprobación en cada cambio, Plan solo lee"
+  "What agents that change code may do: Auto changes files and runs commands alone, Ask waits for your approval on each change, Plan only reads": "Lo que pueden hacer los agentes que cambian código: Auto cambia archivos y corre comandos solo, Preguntar espera tu aprobación en cada cambio, Plan solo lee",
+  "Default": "Predeterminado",
+  "your account": "tu cuenta",
+  "Uses Antigravity installed on this PC with your own Google account, no API key. It counts against your Antigravity limits. Press List to see the models your account has.": "Usa el Antigravity instalado en esta PC con tu propia cuenta de Google, sin API key. Cuenta para los límites de tu Antigravity. Aprieta List para ver los modelos que tiene tu cuenta."
 }

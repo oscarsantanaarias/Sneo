@@ -82,11 +82,11 @@ export default function AgentModels({apiUrl, routes, presets, claudeModels, clau
               <div key={item.id} className="agents-route" style={{'--route': colorOf(item)}}>
                 <div className="agents-row">
                   <input className="agents-name" value={item.name} onChange={(e) => onEdit(item.id, {name: e.target.value})} aria-label={tr('Name')} />
-                  <span className="agents-kind">{item.kind === 'local' ? tr('this PC') : item.kind === 'claude' ? 'Claude' : item.kind === 'claudecode' ? tr('your plan') : 'API'}</span>
+                  <span className="agents-kind">{item.kind === 'local' ? tr('this PC') : item.kind === 'claude' ? 'Claude' : item.kind === 'claudecode' ? tr('your plan') : item.kind === 'agy' ? tr('your account') : 'API'}</span>
                   <button type="button" className="icon-btn icon-danger" title={tr('Remove')} onClick={() => onRemove(item.id)}><i className="fa-solid fa-xmark"></i></button>
                 </div>
 
-                {item.kind !== 'claude' && item.kind !== 'claudecode' && (
+                {item.kind !== 'claude' && item.kind !== 'claudecode' && item.kind !== 'agy' && (
                   <input value={item.baseUrl} placeholder="https://.../v1" onChange={(e) => onEdit(item.id, {baseUrl: e.target.value})} aria-label={tr('Address')} />
                 )}
 
@@ -109,6 +109,7 @@ export default function AgentModels({apiUrl, routes, presets, claudeModels, clau
                       {/* la lista del navegador solo mostraba los parecidos a lo escrito: con la lista bajada va un select con todos */}
                       {(modelLists[item.id] || []).length ? (
                         <select value={item.model} onChange={(e) => onEdit(item.id, {model: e.target.value})} aria-label={tr('Model')}>
+                          {item.kind === 'agy' && <option value="">{tr('Default')}</option>}
                           {item.model && !modelLists[item.id].includes(item.model) && <option value={item.model}>{item.model}</option>}
                           {modelLists[item.id].map(model => <option key={model} value={model}>{model}</option>)}
                         </select>
@@ -133,7 +134,11 @@ export default function AgentModels({apiUrl, routes, presets, claudeModels, clau
                   <em className="field-help">{tr('Uses Claude Code installed on this PC with your own Claude account, no API key. It counts against your plan limits.')}</em>
                 )}
 
-                {item.kind !== 'local' && item.kind !== 'claudecode' && (
+                {item.kind === 'agy' && (
+                  <em className="field-help">{tr('Uses Antigravity installed on this PC with your own Google account, no API key. It counts against your Antigravity limits. Press List to see the models your account has.')}</em>
+                )}
+
+                {item.kind !== 'local' && item.kind !== 'claudecode' && item.kind !== 'agy' && (
                   <div className="agents-row">
                     <input type="password" value={item.apiKey} placeholder={tr('API key')} autoComplete="off" onChange={(e) => onEdit(item.id, {apiKey: e.target.value})} aria-label={tr('API key')} />
                     {item.kind === 'claude' && (

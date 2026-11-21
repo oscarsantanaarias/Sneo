@@ -16,6 +16,7 @@ import { getAgentAnswer, runSubAgent, toolParallelAgents } from './agents.js';
 import { askRoute, chatAgent, maskRoutes, readAgents, readRoutes, routeLabel, routePresets, runTeam, saveAgents, saveRoutes } from './teams.js';
 import { claudeModels } from './claude.js';
 import { claudeCodeModels, dropChatSession } from './claudecode.js';
+import { antigravityModels } from './antigravity.js';
 import { answerApproval, approveRun, queueFor, runStore, stopChildren } from './runs.js';
 import { pickFiles, pickFolder } from './picker.js';
 import { accessModes, normalizeMode } from './gate.js';
@@ -1030,6 +1031,11 @@ router.post('/team/models', async (req, res) => {
 
   if(route.kind === 'claudecode'){
     return res.status(200).json({models: claudeCodeModels.map(item => item.id).filter(Boolean)});
+  }
+
+  if(route.kind === 'agy'){
+    const models = (await antigravityModels()).map(item => item.id);
+    return res.status(200).json({models, message: models.length ? '' : 'Antigravity is not installed or not signed in on this PC'});
   }
 
   try {

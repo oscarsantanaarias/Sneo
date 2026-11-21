@@ -1,4 +1,4 @@
-import { spawn } from 'child_process';
+import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -8,6 +8,7 @@ import { paths } from './config.js';
 // claude code instalado en esta pc: usa la cuenta del usuario sin api key
 export const claudeCodeModels = [
   {id: '', name: 'Default'},
+  {id: 'fable', name: 'Fable'},
   {id: 'opus', name: 'Opus'},
   {id: 'sonnet', name: 'Sonnet'},
   {id: 'haiku', name: 'Haiku'}
@@ -39,11 +40,22 @@ const findClaude = () => {
     }
   }
 
-  found = places.find(file => file && fs.existsSync(file)) || null;
+  // se usa el mas nuevo: el de la terminal puede quedar viejo y no conocer los modelos nuevos (ahi fable era 5.1 y no 5.2)
+  const versionOf = (file) => {
+    try {
+      return (String(execFileSync(file, ['--version'], {timeout: 15000, windowsHide: true})).match(/(\d+)\.(\d+)\.(\d+)/) || []).slice(1).map(Number);
+    } catch(e) {
+      return [];
+    }
+  };
+  const newest = [...new Set(places.filter(file => file && fs.existsSync(file)))]
+    .map(file => ({file, version: versionOf(file)}))
+    .sort((a, b) => (b.version[0] || 0) - (a.version[0] || 0) || (b.version[1] || 0) - (a.version[1] || 0) || (b.version[2] || 0) - (a.version[2] || 0));
+  found = newest[0]?.file || null;
   return found;
 };
 
-const flatten = (messages) => {
+export const flattenChat = (messages) => {
   const system = [];
   const turns = [];
 
@@ -62,6 +74,15 @@ const flatten = (messages) => {
   // una sola pregunta va tal cual y una conversacion se pasa como transcripcion
   const prompt = turns.length === 1 ? turns[0].replace(/^User: /, '') : `${turns.join('\n\n')}\n\nAnswer the last user message.`;
   return {system: system.join('\n\n'), prompt};
+};
+
+// los modelos que solo escriben texto no ven las herramientas: solo les llegaban los nombres y adivinaban los argumentos
+// van descritas en el texto con la forma exacta que lee parseToolCall
+export const toolsText = (tools) => {
+  const list = (Array.isArray(tools) ? tools : []).map(item => item?.function || item).filter(fn => fn?.name);
+  if(!list.length) return '';
+  const lines = list.map(fn => `- ${fn.name}: ${String(fn.description || '').slice(0, 300)} Arguments: ${JSON.stringify(fn.parameters?.properties || {})}`);
+  return `Tools you can call. To call one, reply with only this JSON and nothing else: {"tool": "<name>", "args": {...}}. Its result comes in the next message. When you have the answer, reply with plain text.\n${lines.join('\n')}`;
 };
 
 const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -154,8 +175,8 @@ const runClaude = async (route, system, input, run, session = []) => {
 };
 
 export const askClaudeCode = async (route, messages, tools, run) => {
-  const {system, prompt} = flatten(messages);
-  return await runClaude(route, system, prompt, run);
+  const {system, prompt} = flattenChat(messages);
+  return await runClaude(route, [system, toolsText(tools)].filter(Boolean).join('\n\n'), prompt, run);
 };
 
 // una sesion de claude por chat: la primera vez lleva el contexto entero y despues solo lo nuevo

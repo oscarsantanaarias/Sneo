@@ -106,10 +106,15 @@ export default function AgentModels({apiUrl, routes, presets, claudeModels, clau
                     </select>
                   ) : (
                     <>
-                      <input list={`models-${item.id}`} value={item.model} placeholder={item.kind === 'local' ? tr('the model loaded there') : tr('model id')} onChange={(e) => onEdit(item.id, {model: e.target.value})} aria-label={tr('Model')} />
-                      <datalist id={`models-${item.id}`}>
-                        {(modelLists[item.id] || []).map(model => <option key={model} value={model} />)}
-                      </datalist>
+                      {/* la lista del navegador solo mostraba los parecidos a lo escrito: con la lista bajada va un select con todos */}
+                      {(modelLists[item.id] || []).length ? (
+                        <select value={item.model} onChange={(e) => onEdit(item.id, {model: e.target.value})} aria-label={tr('Model')}>
+                          {item.model && !modelLists[item.id].includes(item.model) && <option value={item.model}>{item.model}</option>}
+                          {modelLists[item.id].map(model => <option key={model} value={model}>{model}</option>)}
+                        </select>
+                      ) : (
+                        <input value={item.model} placeholder={item.kind === 'local' ? tr('the model loaded there') : tr('model id')} onChange={(e) => onEdit(item.id, {model: e.target.value})} aria-label={tr('Model')} />
+                      )}
                       {item.kind !== 'local' && <button type="button" className="agents-small" onClick={() => listModels(item.id)}>{tr('List')}</button>}
                     </>
                   )}

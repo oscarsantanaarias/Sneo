@@ -1033,8 +1033,17 @@ router.post('/team/models', async (req, res) => {
   }
 
   try {
-    const list = await fetch(`${route.baseUrl}/models`, {headers: route.apiKey ? {Authorization: `Bearer ${route.apiKey}`} : {}, signal: AbortSignal.timeout(20000)}).then(answer => answer.json());
-    const models = (list.data || list.models || []).map(item => item.id || item.name).filter(Boolean).slice(0, 300);
+    // una direccion mal puesta contesta 404 sin cuerpo y salia unexpected end of json input en vez del codigo
+    const answer = await fetch(`${route.baseUrl}/models`, {headers: route.apiKey ? {Authorization: `Bearer ${route.apiKey}`} : {}, signal: AbortSignal.timeout(20000)});
+    if(!answer.ok){
+      return res.status(200).json({models: [], message: `Provider answered ${answer.status}, check the address`});
+    }
+    const list = await answer.json();
+    // google pone models/ adelante y mezcla modelos de voz imagen y live que no sirven para chatear
+    const notChat = /(tts|image|imagen|embedding|veo|lyria|genie|live|transcribe|audio|aqa|robotics|computer-use|nano-banana|whisper|dall-e|moderation|realtime|deep-research)/i;
+    const models = [...new Set((list.data || list.models || []).map(item => String(item.id || item.name || '').replace(/^models\//, '')).filter(name => name && !notChat.test(name)))]
+      .sort((a, b) => b.localeCompare(a, 'en', {numeric: true}))
+      .slice(0, 300);
     return res.status(200).json({models});
   } catch(e) {
     return res.status(200).json({models: [], message: String(e.message || e)});

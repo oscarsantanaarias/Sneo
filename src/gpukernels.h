@@ -3050,24 +3050,28 @@ extern "C" __global__ void planExperts(const int* ids, const int* slots, const i
     if(lane == 0) *spillTotal = __popc(spilled);
 }
 
+// el borrador puede elegir entre mas expertos que el modelo: los arreglos por experto toman el mayor
+#ifndef PLAN_EXPERTS
+#define PLAN_EXPERTS EXPERTS
+#endif
 extern "C" __global__ void planBatch(const int* ids, const int* slots, const int* warmSlots, int tokens, int share, int* assign, int* groupSlot, int* groupInput, int* groupCount, int* warmSlot, int* warmCount, int* warmInput, int* spillTotal, float* weights, int tail, int* teams, int* warmTeams) {
     int lane = threadIdx.x;
     unsigned int below = (1u << lane) - 1u;
     int residentSoFar = 0, warmSoFar = 0, spillSoFar = 0;
-    __shared__ int home[EXPERTS];
+    __shared__ int home[PLAN_EXPERTS];
     __shared__ int keptFill[128 * KUSED];
     __shared__ int warmFill[128 * KUSED];
     int keptSeats = 0, warmSeats = 0;
     if(teams){
-        for(int i = lane; i < EXPERTS; i += 32) home[i] = -1;
+        for(int i = lane; i < PLAN_EXPERTS; i += 32) home[i] = -1;
         for(int i = lane; i < 4 * KUSED * tokens; i += 32){
             teams[i] = -1;
             warmTeams[i] = -1;
         }
         __syncwarp();
     }
-    __shared__ int side[EXPERTS];
-    for(int i = lane; i < EXPERTS; i += 32) side[i] = -1;
+    __shared__ int side[PLAN_EXPERTS];
+    for(int i = lane; i < PLAN_EXPERTS; i += 32) side[i] = -1;
     int misses = 0;
     for(int t = 0; t < tokens; t++){
         int e = lane < KUSED ? ids[t * KUSED + lane] : 0;

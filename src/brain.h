@@ -139,7 +139,8 @@ struct Brain {
             std::filesystem::path beside = std::filesystem::path(path).parent_path() / "Qwen3.8-Flash-Next.draft-q2.gguf";
             std::filesystem::path shared = std::filesystem::path(runtimeFolder()).parent_path() / "modelos" / "Qwen3.8-Flash-Next.draft-q2.gguf";
             bool blob = std::filesystem::path(path).parent_path().filename() == "blobs";
-            if(wantDraft) next->draftPath = blob ? sharedDraftOf(path) : (std::filesystem::exists(beside) ? beside : shared).string();
+            // SNEO_NO_DRAFT=1 deja solo la copia del contexto para medir cuanto aporta el borrador
+            if(wantDraft && !std::getenv("SNEO_NO_DRAFT")) next->draftPath = blob ? sharedDraftOf(path) : (std::filesystem::exists(beside) ? beside : shared).string();
             next->relayLimit = std::max(2, std::min(33, std::max(draftLength, copyReach) + 1));
             next->graphRows = std::max(5, std::min(9, std::max(draftLength, copyReach) + 1));
             next->foresee = foresee;

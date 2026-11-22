@@ -2309,7 +2309,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
         NvmlLink& probeNv = nvmlLink();
         if(probeNv.ready) probeNv.getMemory(probeNv.device, probeMemory);
         uint64_t probeFree = probeMemory[1];
-        std::cout << ", borrowed rows " << brain.gpu->loanUsed << ", context room " << brain.gpu->kvRoom << ", recent slots given back " << brain.gpu->givenBack << " of " << brain.gpu->recentPerLayer << ", fixed " << brain.gpu->fixedExperts << ", free vram " << (probeFree >> 20) << " MB" << (brain.gpu->budgetBytes ? ", windows budget " + std::to_string(brain.gpu->budgetBytes >> 20) + " MB, used " + std::to_string(brain.gpu->usageBytes >> 20) + " MB" : std::string()) << ", graphs " << brain.gpu->tokenGraphs.size();
+        std::cout << ", borrowed rows " << brain.gpu->loanUsed << ", context room " << brain.gpu->kvRoom << ", recent slots given back " << brain.gpu->givenBack << " of " << brain.gpu->recentPerLayer + brain.gpu->extraGive << ", fixed " << brain.gpu->fixedExperts << ", free vram " << (probeFree >> 20) << " MB" << (brain.gpu->budgetBytes ? ", windows budget " + std::to_string(brain.gpu->budgetBytes >> 20) + " MB, used " + std::to_string(brain.gpu->usageBytes >> 20) + " MB" : std::string()) << ", graphs " << brain.gpu->tokenGraphs.size();
     }
     if(brain.gpu && brain.gpu->helper.rows > helperRowsBefore) std::cout << ", second gpu " << brain.gpu->helper.rows - helperRowsBefore << " expert rows, waited " << brain.gpu->helperWaitMs - helperWaitBefore << " ms";
     if(brain.gpu && brain.gpu->helper.problem != helperProblem) std::cout << ", second gpu: " << brain.gpu->helper.problem;

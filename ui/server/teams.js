@@ -238,7 +238,7 @@ const dropThinking = (text) => String(text || '')
   .trim();
 
 // una vuelta de chat con un agente: sin proyecto contesta directo y con proyecto puede leer el codigo
-export const chatAgent = async ({agent, route, history, project, peers = [], rounds = 100, run, onStep, runWorker}) => {
+export const chatAgent = async ({agent, route, history, project, peers = [], rounds = 100, shortReports = true, run, onStep, runWorker}) => {
   const clean = cleanAgent(agent);
   const handoff = peers.length
     ? ` The other agents are ${peers.join(', ')}. To give one of them work, write a line that starts with @Name: and the message, for example "@${peers[0]}: check the login code and tell me what breaks". Only those lines reach them, so never say you sent, asked or dispatched something without writing that line. Their answer comes back to you as a message that starts with "Report from <name>:". Messages that start with "From <name>:" were sent to you by that agent.`
@@ -257,6 +257,13 @@ export const chatAgent = async ({agent, route, history, project, peers = [], rou
 
   // cada panel sigue su propia conversacion con claude code o antigravity y en cada turno solo manda lo nuevo
   run = run ? {...run, sessionKey: `${clean.id}|${project || ''}|${route.id}|${route.model || ''}`} : run;
+
+  // con reportes cortos la respuesta a otro agente vuelve corta: queda en su conversacion y la relee en cada turno
+  // va en el mensaje y no en el sistema para que cambiar la opcion no corte la conversacion del panel
+  const asker = String(past[past.length - 1].content).match(/^From ([^:\n]{1,40}):/);
+  if(shortReports && asker && peers.includes(asker[1])){
+    past[past.length - 1] = {...past[past.length - 1], content: `${past[past.length - 1].content}\n\n(Your answer goes back to ${asker[1]} as a report that stays in their conversation, so keep it short, about 150 words at most: what you did or found with file and line, the files you changed, whether it runs and what is left. No code blocks or file contents, ${asker[1]} can read the files.)`};
+  }
 
   if(clean.tools && project && runWorker){
     const last = past.pop();

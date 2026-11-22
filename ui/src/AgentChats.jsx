@@ -324,6 +324,9 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
   const routeOf = agent => routes.find(item => item.id === agent?.route);
   const readyRef = useRef(readyOf);
   readyRef.current = readyOf;
+  // los encargos entre agentes salen despues: usan el modo, las vueltas y el proyecto de ahora y no los de cuando se escribio el primer mensaje
+  const pickedRef = useRef({});
+  pickedRef.current = {mode: agentMode, rounds, project: chatProject};
 
   useEffect(() => {
     fetch(`${apiUrl}/api/team/agents`)
@@ -444,7 +447,7 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
       const req = await fetch(`${apiUrl}/api/team/chat`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({agent, history, project: chatProject, rounds, mode: agentMode, peers: agentsRef.current.filter(item => item.id !== id).map(item => item.name)}),
+        body: JSON.stringify({agent, history, project: pickedRef.current.project, rounds: pickedRef.current.rounds, mode: pickedRef.current.mode, peers: agentsRef.current.filter(item => item.id !== id).map(item => item.name)}),
         signal: stop.signal
       });
       let answered = false;

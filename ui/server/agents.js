@@ -216,6 +216,29 @@ const parsePythonIdaCall = (text) => {
   return {tool: 'ida', args: {command: `${commands[m[1].toLowerCase()]} ${m[2]}${m[3] ? ` ${m[3]}` : ''}`.trim()}};
 };
 
+// varias llamadas en una respuesta: un arreglo json o un objeto por linea, cada una leida como parseToolCall
+// si alguna no se entiende se lee como antes una sola
+export const parseToolCalls = (text) => {
+  const bare = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+
+  if(bare.startsWith('[') && bare.endsWith(']')){
+    try {
+      const list = JSON.parse(bare);
+      const calls = (Array.isArray(list) ? list : []).slice(0, 8).map(item => parseToolCall(JSON.stringify(item)));
+      if(calls.length && calls.every(Boolean)) return calls;
+    } catch(e) {}
+  }
+
+  const lines = bare.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+  if(lines.length > 1 && lines.every(line => line.startsWith('{') && line.endsWith('}'))){
+    const calls = lines.slice(0, 8).map(line => parseToolCall(line));
+    if(calls.every(Boolean)) return calls;
+  }
+
+  const one = parseToolCall(text);
+  return one ? [one] : [];
+};
+
 export const parseToolCall = (text) => {
   const bare = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const blocks = bare.startsWith('{') && bare.endsWith('}') ? [bare] : [];
@@ -637,45 +660,53 @@ Deliver clear findings, risks and the next step.
       continue;
     }
 
-    const call = parseToolCall(answer);
+    const calls = parseToolCalls(answer);
 
-    if(!call && hasBrokenToolCall(answer)){
+    if(!calls.length && hasBrokenToolCall(answer)){
       messages.push({role: 'assistant', content: answer});
       messages.push({role: 'user', content: toolJsonFixMessage});
       continue;
     }
 
-    if(!call){
+    if(!calls.length){
       return {name, role, answer, tools};
     }
 
-    const callArgs = {...(call.args || {})};
+    // los modelos de solo texto pueden pedir varias herramientas juntas: cada vuelta les cuesta una llamada entera
+    const results = [];
 
-    await placeCall(call.tool, callArgs, project);
+    for(const call of calls){
+      const callArgs = {...(call.args || {})};
 
-    let result;
-    const toolStart = Date.now();
+      await placeCall(call.tool, callArgs, project);
 
-    onStep?.({tool: call.tool, detail: stepDetail(callArgs)});
+      let result;
+      const toolStart = Date.now();
 
-    try {
-      result = repeated(call.tool, callArgs)
-        ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
-        : canEdit && editTools.includes(call.tool)
-          ? await runTool(call.tool, callArgs)
-          : await runSubTool(call.tool, callArgs);
-    } catch(e) {
-      result = {error: String(e.message || e)};
+      onStep?.({tool: call.tool, detail: stepDetail(callArgs)});
+
+      try {
+        result = repeated(call.tool, callArgs)
+          ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
+          : canEdit && editTools.includes(call.tool)
+            ? await runTool(call.tool, callArgs)
+            : await runSubTool(call.tool, callArgs);
+      } catch(e) {
+        result = {error: String(e.message || e)};
+      }
+
+      if(run?.usage){
+        run.usage.toolMs += Date.now() - toolStart;
+        run.usage.toolCalls++;
+      }
+
+      tools.push({tool: call.tool, args: callArgs, result});
+      results.push(`Tool ${call.tool} result:\n${toon(result).slice(0, 6000)}`);
     }
 
-    if(run?.usage){
-      run.usage.toolMs += Date.now() - toolStart;
-      run.usage.toolCalls++;
-    }
-
-    tools.push({tool: call.tool, args: callArgs, result});
+    i += calls.length - 1;
     messages.push({role: 'assistant', content: answer});
-    messages.push({role: 'user', content: `Tool ${call.tool} result:\n${toon(result).slice(0, 6000)}\n\nFinish your answer or request another tool.`});
+    messages.push({role: 'user', content: `${results.join('\n\n')}\n\nFinish your answer or request another tool.`});
   }
 
   // sin vueltas no se tira lo leido: se le pide la conclusion con lo que ya tiene

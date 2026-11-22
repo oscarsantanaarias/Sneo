@@ -255,6 +255,9 @@ export const chatAgent = async ({agent, route, history, project, peers = [], rou
     throw new Error('Write a message for the agent first');
   }
 
+  // cada panel sigue su propia conversacion con claude code o antigravity y en cada turno solo manda lo nuevo
+  run = run ? {...run, sessionKey: `${clean.id}|${project || ''}|${route.id}|${route.model || ''}`} : run;
+
   if(clean.tools && project && runWorker){
     const last = past.pop();
     const writer = clean.edits

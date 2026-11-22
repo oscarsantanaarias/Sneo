@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
 import { paths } from './config.js';
+import { sessionPart, keepSession, dropSession } from './textsession.js';
 
 // claude code instalado en esta pc: usa la cuenta del usuario sin api key
 export const claudeCodeModels = [
@@ -82,7 +83,7 @@ export const toolsText = (tools) => {
   const list = (Array.isArray(tools) ? tools : []).map(item => item?.function || item).filter(fn => fn?.name);
   if(!list.length) return '';
   const lines = list.map(fn => `- ${fn.name}: ${String(fn.description || '').slice(0, 300)} Arguments: ${JSON.stringify(fn.parameters?.properties || {})}`);
-  return `Tools you can call. To call one, reply with only this JSON and nothing else: {"tool": "<name>", "args": {...}}. Its result comes in the next message. When you have the answer, reply with plain text.\n${lines.join('\n')}`;
+  return `Tools you can call. To call one, reply with only this JSON and nothing else: {"tool": "<name>", "args": {...}}. To call several that do not depend on each other, reply with only a JSON array of those objects. The results come in the next message. When you have the answer, reply with plain text.\n${lines.join('\n')}`;
 };
 
 const efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -94,7 +95,7 @@ const plannerHome = () => {
   return home;
 };
 
-const runClaude = async (route, system, input, run, session = []) => {
+const runClaude = async (route, system, input, run, session = [], resumed = false) => {
   const exe = findClaude();
 
   if(!exe){
@@ -105,8 +106,13 @@ const runClaude = async (route, system, input, run, session = []) => {
   // claude code le cuenta la carpeta y el sistema donde corre, que no son los del usuario
   system = `${system}\n\nIgnore the working directory, platform, git and environment details of this session: they belong to a helper process, not to the user or the project.`.trim();
   const shortSystem = system.length <= 8000;
+  // al retomar una sesion el sistema largo ya esta en su primer mensaje y no se vuelve a mandar
   const args = ['-p', '--output-format', 'json', '--strict-mcp-config', '--tools', '',
-    '--system-prompt', shortSystem ? system || 'You are a helpful assistant.' : 'Follow the instructions at the start of the message.'];
+    '--system-prompt', shortSystem
+      ? system || 'You are a helpful assistant.'
+      : resumed
+        ? 'Follow the instructions at the start of the conversation.'
+        : 'Follow the instructions at the start of the message.'];
   args.push(...(session.length ? session : ['--no-session-persistence']));
 
   if(route.model){
@@ -139,7 +145,7 @@ const runClaude = async (route, system, input, run, session = []) => {
       if(!out.trim()) return reject(new Error(err.trim() || `claude exited with ${code}`));
       resolve(out);
     });
-    child.stdin.end(shortSystem || !system ? input : `${system}\n\n---\n\n${input}`);
+    child.stdin.end(shortSystem || !system || resumed ? input : `${system}\n\n---\n\n${input}`);
   });
 
   let reply;
@@ -176,7 +182,40 @@ const runClaude = async (route, system, input, run, session = []) => {
 
 export const askClaudeCode = async (route, messages, tools, run) => {
   const {system, prompt} = flattenChat(messages);
-  return await runClaude(route, [system, toolsText(tools)].filter(Boolean).join('\n\n'), prompt, run);
+  const fullSystem = [system, toolsText(tools)].filter(Boolean).join('\n\n');
+
+  if(!run?.sessionKey){
+    return await runClaude(route, fullSystem, prompt, run);
+  }
+
+  // cada panel tiene su sesion de claude code: la primera vez va todo y despues solo lo nuevo, lo repetido sale de la cache
+  const key = `claude|${run.sessionKey}`;
+  const part = sessionPart(key, route, messages);
+
+  if(part.record){
+    try {
+      const reply = await runClaude(route, fullSystem, part.prompt, run, ['--resume', part.record.id], true);
+      keepSession(key, route, part.system, {id: part.record.id, reply: reply.content});
+      return reply;
+    } catch(e) {
+      dropSession(key);
+      dropSessionFile(part.record.id);
+      if(run?.signal?.aborted) throw e;
+    }
+  }
+
+  const old = dropSession(key);
+  if(old?.id) dropSessionFile(old.id);
+  const id = crypto.randomUUID();
+
+  try {
+    const reply = await runClaude(route, fullSystem, prompt, run, ['--session-id', id]);
+    keepSession(key, route, part.system, {id, reply: reply.content});
+    return reply;
+  } catch(e) {
+    dropSessionFile(id);
+    throw e;
+  }
 };
 
 // una sesion de claude por chat: la primera vez lleva el contexto entero y despues solo lo nuevo

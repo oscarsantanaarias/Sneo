@@ -337,6 +337,9 @@ struct GpuModel {
     bool draftConsumed = true;
     float draftSure = 0.6f;
     int draftBatch = 1024;
+    // los modelos recortados a 256 expertos usan el borrador de 512: el borrador elige entre los suyos
+    // 0 cuando el borrador tiene los mismos que el modelo
+    int draftExperts = 0;
     // el borrador incluido en el modelo adivina solo entre los primeros 64K ids (98% de los tokens de codigo y de texto):
     // con la cabeza entera cada token adivinado leia ~1 GB en un 27B, asi tarda la mitad (medido 530 a 270 ms por 256 tokens)
     int draftHeadRows = 65536;
@@ -507,6 +510,8 @@ struct GpuModel {
     bool fp4Tensor = false;
     KernelModule fp4Module;
     uint64_t fp4Codes = 0, fp4Scales = 0, fp4TokenScale = 0;
+    bool lazyContext = false;
+    int extraGive = 0;
     uint64_t gateRows = 0, mappedGateRows = 0;
     float* hostGateRows = nullptr;
     uint64_t mappedWeights = 0;
@@ -1210,12 +1215,16 @@ struct GpuModel {
             directRows = false;
         }
         verifyLimit = std::max(verifyLimit, relayLimit);
+        int draftOwn = file.arch == "qwen4exp" && !draftPath.empty() ? expertsInFile(draftPath) : 0;
+        draftExperts = draftOwn != expertCount && draftOwn % 32 == 0 && draftOwn <= 1024 ? draftOwn : 0;
+        int expertsDefined = expertCount % 32 == 0 ? expertCount : 32;
         std::string sizes = "#define HIDDEN " + std::to_string(hidden)
             + "\n#define HC " + std::to_string(hcCount)
             + "\n#define HCW " + std::to_string(hcWidth)
             + "\n#define HCR " + std::to_string(std::max(hcRank, 32))
             + "\n#define KUSED " + std::to_string(expertsUsed)
-            + "\n#define EXPERTS " + std::to_string(expertCount % 32 == 0 ? expertCount : 32)
+            + "\n#define EXPERTS " + std::to_string(expertsDefined)
+            + "\n#define PLAN_EXPERTS " + std::to_string(std::max(expertsDefined, draftExperts))
             + "\n#define CONVW " + std::to_string(convWidth)
             + "\n#define INNER " + std::to_string(innerWidth)
             + "\n#define VHEADS " + std::to_string(valueHeads)
@@ -1826,7 +1835,7 @@ struct GpuModel {
         scores = grab(indexHeads > 0 ? W * scoreStride * 4 : 256);
         cells = grab(W * 4096 * 4);
         positionsOnGpu = grab(T * 4);
-        routerOut = grab(W * expertCount * 4);
+        routerOut = grab(W * std::max(expertCount, draftExpertCount()) * 4);
         scalar = grab(T * 4);
         sharedGateOut = grab(W * expertWidth * 4);
         sharedUpOut = grab(W * expertWidth * 4);
@@ -1857,7 +1866,7 @@ struct GpuModel {
         nextWeights = grab(C * expertsUsed * 4);
         uint64_t D = (uint64_t)expertsUsed * draftBatch;
         planWidth = std::max<uint64_t>(expertCount, (uint64_t)expertsUsed * std::max(std::max(relayLimit, promptRelay), 16));
-        lists = grab(std::max(2 * S + 6 * planWidth, D + 6 * std::max<uint64_t>(expertCount, D)) * 4);
+        lists = grab(std::max(2 * S + 6 * planWidth, D + 6 * std::max<uint64_t>(std::max(expertCount, draftExpertCount()), D)) * 4);
         if(expertScales) gateRows = grab(S * 4);
         if(fp4Tensor){
             fp4Codes = grab(T * hidden / 2);
@@ -1998,6 +2007,8 @@ struct GpuModel {
             if(!layers[l].attention) snapshotBytes += (uint64_t)valueHeads * ssmSize * ssmSize * 4 + (uint64_t)3 * convWidth * 4;
         }
         uint64_t later = (256ULL << 20) + 3 * snapshotBytes;
+        // lo que dio cada limite la ultima vez para decir en el log cual decidio cuantos expertos entran
+        uint64_t roomCard = 0, roomCap = ~0ULL, roomWindows = ~0ULL;
         auto expertRoom = [&]() -> uint64_t {
             size_t freeBytes = 0, totalBytes = 0;
             cudaLink().info(&freeBytes, &totalBytes);
@@ -2008,6 +2019,7 @@ struct GpuModel {
             uint64_t room = freeBytes > keep + later
                 ? freeBytes - keep - later
                 : 0;
+            roomCard = room;
             uint64_t spent = freeAtStart > freeBytes ? freeAtStart - freeBytes : 0;
             // lo libre de nvml ve toda la tarjeta y lo de cuda en windows solo este proceso: con otro motor en la misma tarjeta
             // se contaba como gastado por este lo que tenia el otro y el segundo modelo cargaba sin expertos en la vram
@@ -2017,13 +2029,15 @@ struct GpuModel {
                 uint64_t lent = cardAtStart > freeAtStart ? cardAtStart - freeAtStart : 0;
                 spent = used > lent ? used - lent : 0;
             }
-            if(vramCap > 0) room = std::min<uint64_t>(room, vramCap > spent + later ? vramCap - spent - later : 0);
+            if(vramCap > 0) roomCap = vramCap > spent + later ? vramCap - spent - later : 0;
+            if(vramCap > 0) room = std::min<uint64_t>(room, roomCap);
             if(expertBudget > 0) room = std::min<uint64_t>(room, expertBudget);
             // windows le da a este programa un presupuesto en la tarjeta menor que lo libre que ve nvml: los expertos lo llenaban
             // y lo que se pide despues (la tabla de calor de 96 KB) fallaba, o windows mandaba parte de la vram a la ram
             uint64_t budgetNow = 0, usageNow = 0;
             if(vramBudget.read(budgetNow, usageNow) && budgetNow > 0){
                 uint64_t allowed = budgetNow > usageNow + keep + later ? budgetNow - usageNow - keep - later : 0;
+                roomWindows = allowed;
                 room = std::min(room, allowed);
             }
             return room;
@@ -2134,17 +2148,33 @@ struct GpuModel {
 
         uint64_t room = expertRoom();
         residentExperts = (int)std::min<uint64_t>(expertCount - warmPerLayer, room / perExpert);
-        uint64_t growth = 0;
+        int roomed = residentExperts;
+        uint64_t growth = 0, growthKept = 0;
         std::vector<char> pending;
         for(const Stretch& s : stretches) growth += stretchNeed(s, contextLimit, pending);
         if(growth > 0){
             uint64_t need = growth + 3ULL * (uint64_t)(endLayer - firstLayer) * pageGrain + (512ULL << 20);
+            int giving = 0;
             auto shortfall = [&](int resident) -> uint64_t {
-                uint64_t cover = keep + (uint64_t)recentFor(resident) * perExpert;
+                uint64_t cover = keep + (uint64_t)(recentFor(resident) + giving) * perExpert;
                 return need > cover ? need - cover : 0;
             };
+            // con 256K se apartaban 2.4 GB al cargar para un contexto que casi nunca llega: 155 expertos por capa en vez de 188
+            // ahora esos fijos quedan en paginas sueltas y se le dan a la memoria del contexto solo si de verdad crece
+            char lazyText[8] = {};
+            bool lazyAsked = GetEnvironmentVariableA("SNEO_LAZY_CONTEXT", lazyText, sizeof(lazyText)) > 0;
+            lazyContext = lazyAsked
+                ? lazyText[0] == '1'
+                : file.arch == "qwen4exp";
+            if(lazyContext){
+                uint64_t left = shortfall(residentExperts);
+                giving = (int)std::min<uint64_t>((left + perExpert - 1) / perExpert, (uint64_t)std::max(0, (residentExperts - recentFor(residentExperts)) / 2));
+            }
             while(residentExperts > 0 && (uint64_t)residentExperts * perExpert + shortfall(residentExperts) > room) residentExperts--;
+            growthKept = shortfall(residentExperts);
+            extraGive = giving;
         }
+        int fitted = residentExperts;
         while(residentExperts > 0){
             size_t mark = allocations.size(), spanMark = poolSpans.size();
             int recentGuess = recentFor(residentExperts);
@@ -2155,7 +2185,7 @@ struct GpuModel {
                 const Matrix* parts[3] = {&L.expertGate, &L.expertUp, &L.expertDown};
                 for(int i = 0; i < 3 && fits; i++){
                     uint64_t span = (uint64_t)parts[i]->rows * parts[i]->stride;
-                    uint64_t ptr = poolBuffer((uint64_t)residentExperts * span + 256, (uint64_t)(residentExperts - recentGuess - spare) * span);
+                    uint64_t ptr = poolBuffer((uint64_t)residentExperts * span + 256, (uint64_t)std::max(0, residentExperts - recentGuess - spare - extraGive) * span);
                     fits = ptr != 0;
                     L.resident[i] = ptr;
                 }
@@ -2172,6 +2202,11 @@ struct GpuModel {
             residentExperts--;
         }
         residentBytes = (uint64_t)residentExperts * perExpert;
+        auto megabytes = [](uint64_t bytes){ return bytes == ~0ULL ? std::string("none") : std::to_string(bytes >> 20) + " MB"; };
+        std::cout << "expert room: card " << megabytes(roomCard) << ", limit " << megabytes(roomCap) << ", windows " << megabytes(roomWindows)
+            << ", " << perExpert / 1048576.0 << " MB per expert, " << planned << " planned per layer, " << roomed << " fit the room, " << fitted << " after keeping "
+            << (growthKept >> 20) << " MB for the context to grow by " << (growth >> 20) << " MB, " << residentExperts << " allocated"
+            << (extraGive > 0 ? ", " + std::to_string(extraGive) + " fixed ones go to the context only if it grows" : std::string()) << std::endl;
         {
             uint64_t budgetNow = 0, usageNow = 0, sharedBudget = 0, sharedUsage = 0;
             vramBudget.readShared(sharedBudget, sharedUsage);
@@ -3413,6 +3448,22 @@ struct GpuModel {
                     : 3;
     }
 
+    int expertsInFile(const std::string& path) {
+        ModelFile shape;
+        std::string error;
+        if(!std::filesystem::exists(path) || !openModel(path, shape, error)) return 0;
+        for(const TensorInfo& t : shape.tensors){
+            if(t.expert && t.dimCount >= 3) return (int)t.dims[2];
+        }
+        return 0;
+    }
+
+    int draftExpertCount() const {
+        return draftExperts > 0 && !tiedDraft
+            ? draftExperts
+            : expertCount;
+    }
+
     bool loadDraft(const std::string& path) {
         ModelFile shape;
         std::string error;
@@ -3421,7 +3472,7 @@ struct GpuModel {
             return false;
         }
         for(const TensorInfo& t : shape.tensors){
-            if(!t.expert || t.dimCount < 3 || (int)t.dims[2] == expertCount) continue;
+            if(!t.expert || t.dimCount < 3 || (int)t.dims[2] == draftExpertCount()) continue;
             problem = "the draft layer has " + std::to_string(t.dims[2]) + " experts and this model " + std::to_string(expertCount);
             return false;
         }
@@ -3522,10 +3573,11 @@ struct GpuModel {
         }
         fclose(f);
 
-        draft.slot.resize(expertCount);
-        for(int e = 0; e < expertCount; e++) draft.slot[e] = e;
-        draft.slots = grabbed((uint64_t)expertCount * 4);
-        if(draft.slots) cudaLink().copyUp(draft.slots, draft.slot.data(), expertCount * 4);
+        int own = draftExpertCount();
+        draft.slot.resize(own);
+        for(int e = 0; e < own; e++) draft.slot[e] = e;
+        draft.slots = grabbed((uint64_t)own * 4);
+        if(draft.slots) cudaLink().copyUp(draft.slots, draft.slot.data(), own * 4);
         auto lined = [&](uint64_t width) -> uint64_t {
             uint64_t total = (uint64_t)contextLimit * width * 9 / 8;
             uint64_t base = stretchBuffer(total, {{0, width}, {(uint64_t)contextLimit * width, width / 8}});
@@ -3753,12 +3805,13 @@ struct GpuModel {
             return;
         }
 
+        int own = draftExpertCount();
         pack(x, n * hidden, 0);
-        plain(draft.router, x, hidden, routerOut, expertCount, n, 0);
+        plain(draft.router, x, hidden, routerOut, own, n, 0);
         plain(draft.sharedScalar, x, hidden, scalar, 1, n, 0);
         projectMany({{&draft.sharedGate, sharedGateOut}, {&draft.sharedUp, sharedUpOut}}, x, 0, n);
-        go("routeTop", (unsigned int)n, 1, expertCount, 1, routerOut, routeIds, routeWeights);
-        uint64_t room = (uint64_t)std::max(expertCount, expertsUsed * n);
+        go("routeTop", (unsigned int)n, 1, own, 1, routerOut, routeIds, routeWeights);
+        uint64_t room = (uint64_t)std::max(own, expertsUsed * n);
         uint64_t plan = lists + 4ULL * expertsUsed * n;
         uint64_t none = 0;
         go("planBatch", 1, 1, 32, 1, routeIds, draft.slots, none, n, 0, lists, plan, plan + 4ULL * room, plan + 8ULL * room, plan + 12ULL * room, plan + 16ULL * room, plan + 20ULL * room, spillCounts, routeWeights, 0, none, none);
@@ -4223,7 +4276,7 @@ struct GpuModel {
                 {&scalar, T * 4},
                 {&routeIds, T * expertsUsed * 4},
                 {&routeWeights, T * expertsUsed * 4},
-                {&lists, std::max(2 * S + 6 * std::max<uint64_t>(expertCount, planWidth), D + 6 * std::max<uint64_t>(expertCount, D)) * 4},
+                {&lists, std::max(2 * S + 6 * std::max<uint64_t>(expertCount, planWidth), D + 6 * std::max<uint64_t>(std::max(expertCount, draftExpertCount()), D)) * 4},
                 {&packs[0].values, P},
                 {&packs[0].scales, P / 8},
                 {&packs[0].sums, P / 8},
@@ -4268,7 +4321,7 @@ struct GpuModel {
                 {&ik, W * indexWidth * 4},
                 {&scores, indexHeads > 0 ? W * scoreStride * 4 : 256},
                 {&cells, W * 4096 * 4},
-                {&routerOut, W * expertCount * 4},
+                {&routerOut, W * std::max(expertCount, draftExpertCount()) * 4},
                 {&sharedGateOut, W * expertWidth * 4},
                 {&sharedUpOut, W * expertWidth * 4},
                 {&sharedHidden, W * expertWidth * 4},
@@ -4502,7 +4555,7 @@ struct GpuModel {
 
     bool giveSlots(int give) {
         if(lent || give <= 0) return false;
-        if(givenBack + give > recentPerLayer || give > fixedExperts) return false;
+        if(givenBack + give > recentPerLayer + extraGive || give > fixedExperts) return false;
         liftHold = true;
         exchangeHold = true;
         auto release = [&](bool fine){

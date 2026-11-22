@@ -9,20 +9,38 @@ import AgentOffice from './AgentOffice.jsx';
 const storeKey = 'sneo.agentChats';
 const mostAgents = 100;
 
-const loadChats = () => {
+// las conversaciones de los paneles van por proyecto: al cambiar de proyecto cada panel muestra la suya
+// lo guardado antes sin proyecto queda en el proyecto que este abierto
+const loadAll = (project) => {
   try {
     const saved = JSON.parse(localStorage.getItem(storeKey) || '{}');
-    return saved && typeof saved === 'object' && !Array.isArray(saved) ? saved : {};
+
+    if(!saved || typeof saved !== 'object' || Array.isArray(saved)){
+      return {};
+    }
+
+    if(saved.projects && typeof saved.projects === 'object' && !Array.isArray(saved.projects)){
+      return saved.projects;
+    }
+
+    return Object.keys(saved).length ? {[project || '']: saved} : {};
   } catch(e) {
     return {};
   }
 };
 
-const keepChats = (chats) => {
+const keepAll = (all) => {
   try {
-    localStorage.setItem(storeKey, JSON.stringify(chats));
+    localStorage.setItem(storeKey, JSON.stringify({projects: all}));
   } catch(e) {
   }
+};
+
+// lo que vuelve al que pidio el encargo con reportes cortos: el texto entero queda en el panel del agente
+const mostReport = 3000;
+const reportOf = (text, name) => {
+  const clean = String(text || '').trim();
+  return clean.length <= mostReport ? clean : `${clean.slice(0, mostReport).trim()}\n\n(cut here, the full answer is in the panel of ${name})`;
 };
 
 const html = (text) => ({__html: DOMPurify.sanitize(marked.parse(String(text || '')))});
@@ -247,7 +265,10 @@ function AgentCard({agent, index, routes, ready, labelOf, messages, step, live, 
 
 export default function AgentChats({apiUrl, routes, projects = [], project = '', saveFirst}){
   const [agents, setAgents] = useState([]);
-  const [chats, setChats] = useState(loadChats);
+  const allChats = useRef(null);
+  if(!allChats.current) allChats.current = loadAll(project);
+  const shownProject = useRef(project || '');
+  const [chats, setChats] = useState(() => allChats.current[project || ''] || {});
   const [steps, setSteps] = useState({});
   const [live, setLive] = useState({});
   const [speeds, setSpeeds] = useState({});
@@ -290,6 +311,22 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
     } catch(e) {}
   };
 
+  // reportes cortos: lo que un agente contesta a otro queda en la conversacion del que pidio y se relee en cada turno suyo
+  const [shortReports, setShortReports] = useState(() => {
+    try {
+      return localStorage.getItem('sneo.agentReports') !== 'full';
+    } catch(e) {
+      return true;
+    }
+  });
+
+  const pickReports = (short) => {
+    setShortReports(short);
+    try {
+      localStorage.setItem('sneo.agentReports', short ? 'short' : 'full');
+    } catch(e) {}
+  };
+
   const answerAsk = async (agentId, askId, answer) => {
     setAsks(prev => ({...prev, [agentId]: (prev[agentId] || []).filter(item => item.id !== askId)}));
     try {
@@ -326,7 +363,7 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
   readyRef.current = readyOf;
   // los encargos entre agentes salen despues: usan el modo, las vueltas y el proyecto de ahora y no los de cuando se escribio el primer mensaje
   const pickedRef = useRef({});
-  pickedRef.current = {mode: agentMode, rounds, project: chatProject};
+  pickedRef.current = {mode: agentMode, rounds, project: chatProject, shortReports};
 
   useEffect(() => {
     fetch(`${apiUrl}/api/team/agents`)
@@ -338,15 +375,32 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
       .catch(e => setNotice(tr('The app server did not answer: {0}', e.message)));
   }, []);
 
+  const working = Object.values(steps).some(Boolean);
+
+  // mientras trabajan no se cambia de proyecto: sus respuestas y encargos terminarian en la conversacion de otro proyecto
+  const switchProject = (next) => {
+    if(Object.values(stepsRef.current).some(Boolean) || next === shownProject.current){
+      return;
+    }
+
+    allChats.current = {...allChats.current, [shownProject.current]: chatsRef.current};
+    shownProject.current = next;
+    chatsRef.current = allChats.current[next] || {};
+    setChats(chatsRef.current);
+    setChatProject(next);
+    keepAll(allChats.current);
+  };
+
   useEffect(() => {
     if(project){
-      setChatProject(project);
+      switchProject(project);
     }
   }, [project]);
 
   useEffect(() => {
     chatsRef.current = chats;
-    keepChats(chats);
+    allChats.current = {...allChats.current, [shownProject.current]: chats};
+    keepAll(allChats.current);
   }, [chats]);
 
   // cada agente sin ruta valida toma la primera que exista para poder contestar
@@ -447,7 +501,7 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
       const req = await fetch(`${apiUrl}/api/team/chat`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({agent, history, project: pickedRef.current.project, rounds: pickedRef.current.rounds, mode: pickedRef.current.mode, peers: agentsRef.current.filter(item => item.id !== id).map(item => item.name)}),
+        body: JSON.stringify({agent, history, project: pickedRef.current.project, rounds: pickedRef.current.rounds, mode: pickedRef.current.mode, shortReports: pickedRef.current.shortReports, peers: agentsRef.current.filter(item => item.id !== id).map(item => item.name)}),
         signal: stop.signal
       });
       let answered = false;
@@ -477,7 +531,7 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
           // los encargos salen de verdad y la respuesta a un encargo vuelve sola al que lo pidio
           handoffs.forEach(item => setTimeout(() => sendTo(item.id, item.text.trim(), id, hops + 1, 'task'), 0));
           if(kind === 'task' && from && !sentBack && hops < mostHops){
-            setTimeout(() => sendTo(from, content, id, hops + 1, 'report'), 0);
+            setTimeout(() => sendTo(from, pickedRef.current.shortReports ? reportOf(content, nameOf(id)) : content, id, hops + 1, 'report'), 0);
           }
           if(hops >= mostHops && parseHandoffs(content, agentsRef.current, id).length){
             push(id, {role: 'error', content: tr('The agents passed work {0} times in a row, stopped here so they do not loop.', mostHops)});
@@ -575,6 +629,11 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
       delete next[id];
       return next;
     });
+    allChats.current = Object.fromEntries(Object.entries(allChats.current).map(([name, list]) => {
+      const kept = {...list};
+      delete kept[id];
+      return [name, kept];
+    }));
 
     if(target === id){
       setTarget('all');
@@ -611,9 +670,9 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
           <span>{tr('{0} separate message streams, each one on its own model', agents.length)}</span>
         </div>
         <div className="chats-tools">
-          <label className="chats-project" title={tr('Agents that can read the project look at this one')}>
+          <label className="chats-project" title={working ? tr('Wait for the agents to finish or stop them to change the project') : tr('Agents that can read the project look at this one. Each project keeps its own conversations')}>
             <i className="fa-solid fa-folder"></i>
-            <select value={chatProject} onChange={(e) => setChatProject(e.target.value)} aria-label={tr('Project')}>
+            <select value={chatProject} disabled={working} onChange={(e) => switchProject(e.target.value)} aria-label={tr('Project')}>
               <option value="">{tr('No project')}</option>
               {projects.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
             </select>
@@ -633,12 +692,20 @@ export default function AgentChats({apiUrl, routes, projects = [], project = '',
             {tr('Tool calls')}
             <input type="number" min="1" max="1000" value={rounds} onChange={(e) => pickRounds(e.target.value)} />
           </label>
+          <label className="chats-rounds" title={tr('What goes back to the agent that gave the work. Short: what was done, the files and what is left, the full answer stays in the panel. It saves tokens because the report stays in the conversation of the agent that asked and is read again on each of its turns')}>
+            <i className="fa-solid fa-compress"></i>
+            {tr('Reports')}
+            <select value={shortReports ? 'short' : 'full'} onChange={(e) => pickReports(e.target.value === 'short')}>
+              <option value="short">{tr('Short')}</option>
+              <option value="full">{tr('Whole')}</option>
+            </select>
+          </label>
           <div className="segmented chats-view">
             <button type="button" className={view === 'panels' ? 'active' : ''} onClick={() => pickView('panels')}><i className="fa-solid fa-table-columns"></i> {tr('Panels')}</button>
             <button type="button" className={view === 'office' ? 'active' : ''} onClick={() => pickView('office')}><i className="fa-solid fa-building"></i> {tr('Office')}</button>
           </div>
           <button type="button" className="agents-small" disabled={agents.length >= mostAgents} onClick={addAgent}><i className="fa-solid fa-plus"></i> {tr('Add agent')}</button>
-          <button type="button" className="agents-small" title={tr('Stops every agent and clears all conversations: they forget everything and start from zero')} onClick={clearLogs}>{tr('Clear logs')}</button>
+          <button type="button" className="agents-small" title={tr('Stops every agent and clears the conversations of this project: they forget everything and start from zero')} onClick={clearLogs}>{tr('Clear logs')}</button>
         </div>
       </div>
 

@@ -1192,6 +1192,7 @@ router.post('/team/chat', async (req, res) => {
       project: cleanText(body.project),
       peers: (Array.isArray(body.peers) ? body.peers : []).map(cleanText).filter(Boolean).slice(0, 8),
       rounds: Math.min(1000, Math.max(1, Math.round(Number(body.rounds)) || 100)),
+      shortReports: body.shortReports !== false,
       run: {signal: stop.signal, usage},
       onStep: step => send({type: 'step', tool: step.tool || '', detail: step.detail || '', thought: step.thought || '', usage: {...usage}}),
       runWorker: runSubAgent

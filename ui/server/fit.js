@@ -111,13 +111,13 @@ const toolRecord = (region) => {
 };
 
 const describe = (item) => {
-  const calls = (item.tool_calls || []).map(call => `${call.function?.name}(${String(call.function?.arguments || '').slice(0, 400)})`).join(', ');
+  const calls = (item.tool_calls || []).map(call => `${call.function?.name} with ${String(call.function?.arguments || '').slice(0, 400)}`).join('; ');
 
   if(item.role === 'tool'){
     return `TOOL RESULT: ${clipText(item.content, 1500)}`;
   }
 
-  return `${String(item.role).toUpperCase()}: ${clipText(item.role === 'assistant' ? withoutThinking(item.content) : item.content, 4000)}${calls ? `\nCALLED: ${calls}` : ''}`;
+  return `${String(item.role).toUpperCase()}: ${clipText(item.role === 'assistant' ? withoutThinking(item.content) : item.content, 4000)}${calls ? `\nTOOLS USED: ${calls}` : ''}`;
 };
 
 const plainSummary = (region) => {

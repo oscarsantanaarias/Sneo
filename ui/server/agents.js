@@ -171,7 +171,7 @@ const TOOL_NAMES = new Set(toolSchemas.map(item => item.function?.name).filter(B
 const isKnownTool = (name) => TOOL_NAMES.has(name) || isPluginTool(name);
 
 const parsePyStyleCall = (text) => {
-  const source = String(text || '').trim().replace(/^`+|`+$/g, '');
+  const source = String(text || '').trim().replace(/^CALLED:\s*/i, '').replace(/^`+|`+$/g, '');
   const m = /^\s*\[?\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\(([\s\S]*)\)\s*\]?\s*$/.exec(source);
 
   if(!m || !isKnownTool(m[1])){
@@ -179,6 +179,22 @@ const parsePyStyleCall = (text) => {
   }
 
   const tool = m[1];
+  const inner = m[2].trim();
+
+  if(inner.startsWith('{') && inner.endsWith('}')){
+    try {
+      const parsed = JSON.parse(inner);
+
+      if(!parsed || typeof parsed !== 'object' || Array.isArray(parsed)){
+        return null;
+      }
+
+      return {tool, args: parsed};
+    } catch(e) {
+      return null;
+    }
+  }
+
   const args = {};
   const argRe = /([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|-?\d+(?:\.\d+)?|true|false)/g;
   let a;
@@ -397,7 +413,7 @@ const parseWriteTag = (text) => {
   return {tool: 'write_file', args: {file: unesc(pathM[1]), content: contentM ? unesc(contentM[1]) : ''}};
 };
 
-const brokenToolRe = new RegExp('^\\s*(?:<\\/?\\s*(?:' + [...TOOL_NAMES].join('|') + ')\\s*[/>(\\s]|(?:' + [...TOOL_NAMES].join('|') + ')\\s*\\()', 'im');
+const brokenToolRe = new RegExp('^\\s*(?:CALLED:\\s*)?(?:<\\/?\\s*(?:' + [...TOOL_NAMES].join('|') + ')\\s*[/>(\\s]|(?:' + [...TOOL_NAMES].join('|') + ')\\s*\\()', 'im');
 
 const hasBrokenToolCall = (text) => {
   const source = String(text || '');
@@ -1317,7 +1333,7 @@ Do not delete files unless the user clearly asks.
       ratio,
       pinned: currentUser,
       summarize: text => askModel([
-        {role: 'system', content: 'You condense the older part of a conversation between a user and a coding agent so the agent can keep working without it. Write a compact summary with: what the user asked and decided, the files and paths involved, the commands run and their results, errors still open, and what was about to happen next. Keep paths, names, numbers and error text exactly as written. Say a tool failed only when its TOOL RESULT shows an error, never guess one. No reasoning of your own, no preamble.'},
+        {role: 'system', content: 'You condense the older part of a conversation between a user and a coding agent so the agent can keep working without it. Write a compact summary with: what the user asked and decided, the files and paths involved, the commands run and their results, errors still open, and what was about to happen next. Keep paths, names, numbers and error text exactly as written. Say a tool failed only when its TOOL RESULT shows an error, never guess one. Tell what each tool did in words, never as a call like name(args): the agent reads this summary and keeps calling tools the normal way. No reasoning of your own, no preamble.'},
         {role: 'user', content: text}
       ], {signal: run.signal, thinkDepth: 'off'})
     });

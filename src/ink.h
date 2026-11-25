@@ -299,7 +299,6 @@ extern "C" __global__ void inkF32Wide(const float* weights, const float* in, int
 }
 
 extern "C" __global__ void inkWide16(const u16* weights, const float* in, int inStride, float* out, int outStride, int cols) {
-    __shared__ float part[32];
     int row = blockIdx.x, t = blockIdx.y;
     const uint4* w = (const uint4*)(weights + (u64)row * cols);
     const float4* x = (const float4*)(in + (u64)t * inStride);
@@ -311,7 +310,7 @@ extern "C" __global__ void inkWide16(const u16* weights, const float* in, int in
         sum += hyHalfAt(wv, 0) * x0.x + hyHalfAt(wv, 1) * x0.y + hyHalfAt(wv, 2) * x0.z + hyHalfAt(wv, 3) * x0.w
              + hyHalfAt(wv, 4) * x1.x + hyHalfAt(wv, 5) * x1.y + hyHalfAt(wv, 6) * x1.z + hyHalfAt(wv, 7) * x1.w;
     }
-    sum = hyBlockSum(sum, part);
+    for(int s = 16; s > 0; s >>= 1) sum += __shfl_xor_sync(0xffffffff, sum, s);
     if(threadIdx.x == 0) out[(u64)t * outStride + row] = sum;
 }
 
@@ -824,21 +823,44 @@ extern "C" __global__ void inkAttendPart(const float* q, const u16* kCache, cons
     dst[2 + 4 * lane + 3] = acc.w;
 }
 
-extern "C" __global__ void inkAttendMerge(const float* scratch, const float* sinks, float* out, int heads, int splits) {
+extern "C" __global__ void inkAttendMerge(const float* scratch, const float* sinks, float* out, const float* gate, i8* pkValues, float* pkScales, int* pkSums, int heads, int splits) {
+    __shared__ float shW[64];
+    __shared__ float shRed[32];
+    __shared__ float shTop;
     int h = blockIdx.x, t = blockIdx.y;
+    int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const float* src = scratch + ((u64)t * heads + h) * splits * 130;
     float sink = sinks[(u64)t * heads + h];
-    float top = sink;
-    for(int s = 0; s < splits; s++) top = fmaxf(top, src[(u64)s * 130]);
-    float total = __expf(sink - top);
-    for(int s = 0; s < splits; s++) total += src[(u64)s * 130 + 1] * __expf(src[(u64)s * 130] - top);
-    float inv = 1.0f / total;
-    float* dst = out + ((u64)t * heads + h) * 128;
-    for(int d = threadIdx.x; d < 128; d += blockDim.x){
-        float v = 0.0f;
-        for(int s = 0; s < splits; s++) v += src[(u64)s * 130 + 2 + d] * __expf(src[(u64)s * 130] - top);
-        dst[d] = v * inv;
+    float localMax = -1e30f;
+    for(int s = tid; s < splits; s += blockDim.x) localMax = fmaxf(localMax, src[(u64)s * 130]);
+    for(int step = 16; step > 0; step >>= 1) localMax = fmaxf(localMax, __shfl_xor_sync(0xffffffff, localMax, step));
+    if(lane == 0) shRed[warp] = localMax;
+    __syncthreads();
+    if(tid == 0){
+        float best = sink;
+        for(int w = 0; w < (blockDim.x >> 5); w++) best = fmaxf(best, shRed[w]);
+        shTop = best;
     }
+    __syncthreads();
+    float top = shTop;
+    float part = tid == 0 ? __expf(sink - top) : 0.0f;
+    for(int s = tid; s < splits; s += blockDim.x){
+        float w = __expf(src[(u64)s * 130] - top);
+        if(s < 64) shW[s] = w;
+        part += src[(u64)s * 130 + 1] * w;
+    }
+    float total = hyBlockSum(part, shRed);
+    float inv = 1.0f / total;
+    float v = 0.0f;
+    for(int s = 0; s < splits; s++){
+        float w = s < 64 ? shW[s] : __expf(src[(u64)s * 130] - top);
+        v += src[(u64)s * 130 + 2 + tid] * w;
+    }
+    u64 idx = ((u64)t * heads + h) * 128 + tid;
+    if(pkValues){
+        float gv = v * inv * hySigmoid(gate[idx]);
+        hyQuant(gv, idx, pkValues, pkScales, pkSums);
+    } else out[idx] = v * inv;
 }
 
 extern "C" __global__ void inkPairs(const int* ids, const float* weights, const float* guScale, const float* dScale, float* rowScale, float* rowWeight, int count) {
@@ -880,9 +902,6 @@ __device__ __forceinline__ void inkUnpack(const u8* block, int g, int* w, float&
 template<int TYPE>
 __device__ __forceinline__ void inkGateUpActRun(const u8* base, u64 rowBytes, u64 slotBytes, const int* ids, const float* guScale, const i8* packed, const float* scales, const int* sums, i8* outValues, float* outScales, int* outSums, int hidden, int width, int used, float gateCap, float upCap, GridTables t) {
     __shared__ float sh[32];
-    __shared__ int4 sP[192];
-    __shared__ float sS[96];
-    __shared__ int sSum[96];
     int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     int lane8 = threadIdx.x & 7, chInWarp = (threadIdx.x >> 3) & 3;
     int c0 = blockIdx.x * 32, j = blockIdx.y;
@@ -891,34 +910,15 @@ __device__ __forceinline__ void inkGateUpActRun(const u8* base, u64 rowBytes, u6
     const u8* expert = base + slotBytes * (u64)e;
     int groups = hidden / 32, perBlock = groupsPerBlock(TYPE), bytes = blockBytes(TYPE);
     u64 first = (u64)tok * groups;
-    if(groups <= 96){
-        if(threadIdx.x < groups * 2) sP[threadIdx.x] = __ldg((const int4*)(packed + first * 32) + threadIdx.x);
-        if(threadIdx.x < groups){
-            sS[threadIdx.x] = __ldg(scales + first + threadIdx.x);
-            sSum[threadIdx.x] = __ldg(sums + first + threadIdx.x);
-        }
-        __syncthreads();
-    }
     const u8* gRow = expert + rowBytes * (u64)c;
     const u8* uRow = expert + rowBytes * (u64)(width + c);
     float gAcc = 0.0f, uAcc = 0.0f;
     for(int u = lane8; u < groups; u += 8){
-        int4 a, b;
-        float sc;
-        int sm;
-        if(groups <= 96){
-            a = sP[2 * u];
-            b = sP[2 * u + 1];
-            sc = sS[u];
-            sm = sSum[u];
-        } else {
-            u64 at = first + u;
-            const int4* q = (const int4*)(packed + at * 32);
-            a = __ldg(q);
-            b = __ldg(q + 1);
-            sc = __ldg(scales + at);
-            sm = __ldg(sums + at);
-        }
+        u64 at = first + u;
+        const int4* q = (const int4*)(packed + at * 32);
+        int4 a = __ldg(q), b = __ldg(q + 1);
+        float sc = __ldg(scales + at);
+        int sm = __ldg(sums + at);
         u64 blockOff = (u64)(u / perBlock) * bytes;
         int gInBlock = u % perBlock;
         int w[8];

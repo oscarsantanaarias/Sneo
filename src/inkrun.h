@@ -768,16 +768,18 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
     int window = L.full ? 0 : s.window;
     int reach = L.full ? inkTop + 1 : std::min(s.window, inkTop + 1);
     float scale = 1.0f / sqrtf(128.0f);
+    bool fuseGate = n <= s.fewRows && L.outA.values;
     for(int first = 0; first < n && !failed; first += s.attendRows){
         int m = std::min(s.attendRows, n - first);
         int most = (int)std::max<uint64_t>(1, b.scratchFloats / ((uint64_t)m * 24 * 130));
         int span = std::max(16, (reach + most - 1) / most);
         int splits = std::max(1, (reach + span - 1) / span);
         go("inkAttendPart", 8, (unsigned int)(m * splits), 96, 1, b.q + 4ULL * first * 3072, R.kCache, R.vCache, R.ring, b.positions + 4ULL * first, b.rel + 4ULL * first * 384, L.relBank, b.scratch, 24, 8, window, s.extent, scale, span, splits);
-        go("inkAttendMerge", 24, (unsigned int)m, 128, 1, b.scratch, b.sink + 4ULL * first * 24, b.attn + 4ULL * first * 3072, 24, splits);
+        if(fuseGate) go("inkAttendMerge", 24, (unsigned int)m, 128, 1, b.scratch, b.sink + 4ULL * first * 24, b.attn + 4ULL * first * 3072, b.gateRaw, pk.values, pk.scales, pk.sums, 24, splits);
+        else go("inkAttendMerge", 24, (unsigned int)m, 128, 1, b.scratch, b.sink + 4ULL * first * 24, b.attn + 4ULL * first * 3072, none, none, none, none, 24, splits);
     }
     check("the attention");
-    go("hyGateMulPack", (unsigned int)(((uint64_t)n * 3072 / 32 + 7) / 8), 1, 32, 8, b.attn, b.gateRaw, n * 3072, pk.values, pk.scales, pk.sums);
+    if(!fuseGate) go("hyGateMulPack", (unsigned int)(((uint64_t)n * 3072 / 32 + 7) / 8), 1, 32, 8, b.attn, b.gateRaw, n * 3072, pk.values, pk.scales, pk.sums);
     if(n <= s.fewRows && L.outA.values) go("inkRowsQ8", (unsigned int)((L.outA.rows + 3) / 4), spread, 32, 1, L.outA.values, L.outA.scales, L.outA.rows, b.proj, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, pk.values, pk.scales, L.outA.cols, n);
     else project(L.out, b.attn, 0, b.proj, n);
     check("the output projection");
@@ -797,7 +799,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         xnPacked = n <= s.fewRows && (L.gateUp.type == 40 || L.gateUp.type == 8) && (L.down.type == 40 || L.down.type == 8);
     }
     check("the mlp input");
-    go("inkWide16", (unsigned int)s.experts, spread, 128, 1, L.router, b.xn, d, b.logits, s.experts, d);
+    go("inkWide16", (unsigned int)s.experts, spread, 32, 1, L.router, b.xn, d, b.logits, s.experts, d);
     go("inkRouteFast", spread, 1, 32, 1, b.logits, L.routerBias, b.ids, b.weights, s.experts, s.used, s.routeScale);
     check("the router");
     if(xnPacked){
@@ -841,7 +843,7 @@ inline bool GpuModel::inkChunk(const int* ids, const int* positions, int n, bool
         int at = 0, count = 0, r = 0;
         auto step = [&](int l, bool messages){
             int boundary = l % s.block == 0 ? l / s.block : -1;
-            if(boundary >= 0) go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, b.h[at], b.blocks[boundary], n * d);
+            if(boundary >= 0 && (!messages || boundary != s.loopStart / s.block)) go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, b.h[at], b.blocks[boundary], n * d);
             inkLayerRun(l, r, b.h[at], b.h[1 - at], count, boundary, n, messages);
             if(boundary >= 0) count = boundary + 1;
             at = 1 - at;

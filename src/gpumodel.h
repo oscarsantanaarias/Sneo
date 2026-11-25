@@ -26,6 +26,7 @@ struct GpuMatrix {
 #include "gemma4.h"
 #include "hy4.h"
 #include "glm5.h"
+#include "ink.h"
 #include "safetensors.h"
 
 inline std::atomic<bool> stopLoading{false};
@@ -314,6 +315,12 @@ struct GpuModel {
     GlmShape glmShape;
     GlmBuffers glmBuffers;
     std::vector<GlmLinear> glmLinears;
+    bool ink = false;
+    InkShape inkShape;
+    InkBuffers inkBuffers;
+    std::vector<InkLayer> inkLayers;
+    std::vector<InkRun> inkRuns;
+    int inkTop = 0;
     FrontLink* remote = nullptr;
     std::vector<float> frontStack;
     // en el nodo del pool: cada parte de filas lista sale apenas se copia de la tarjeta
@@ -650,7 +657,7 @@ struct GpuModel {
         seer.close();
         vramBudget.close();
         processVram.close();
-        if(ready && !hy4 && !glm) saveHeat();
+        if(ready && !hy4 && !glm && !ink) saveHeat();
         if(ready && (hy4 || glm)) hySaveHeat();
         if(hy4 || glm) hyStopUploads();
         if(helper.context) closeHelper();
@@ -1126,6 +1133,14 @@ struct GpuModel {
     void glmLayer(int l, int n);
     bool glmChunk(const int* ids, const int* positions, int n, bool last);
     std::vector<float> forwardGlm(const std::vector<int>& ids, const std::vector<int>& positions);
+    bool loadInk(const std::string& path, int threads);
+    void inkReset();
+    bool moveInk(int slot, bool keep);
+    void inkProject(const GpuMatrix& m, uint64_t input, uint64_t output, int n);
+    void inkExperts(InkLayer& L, int n);
+    void inkLayerRun(int l, int r, uint64_t h, uint64_t next, int count, int boundary, int n, bool messages);
+    bool inkChunk(const int* ids, const int* positions, int n, bool last);
+    std::vector<float> forwardInk(const std::vector<int>& ids, const std::vector<int>& positions);
     void gemmaPack(uint64_t input, int count, PackedInput& packed);
     void gemmaExpertRows(const GpuMatrix& m, uint64_t expertBytes, int perToken, uint64_t input, PackedInput& packed, uint64_t output, int slots);
     int gemmaSplits(const GemmaLayer& L, int n, int top);
@@ -1152,6 +1167,7 @@ struct GpuModel {
         if(file.arch == "gemma4") return loadGemma(path, threads);
         if(file.arch == "hy_v4_flash") return loadHy4(path, threads);
         if(file.arch == "glm5-next") return loadGlm(path, threads);
+        if(file.arch == "inkling2_loop") return loadInk(path, threads);
         dense = file.arch == "qwen35";
         if(dense) residual = false;
         if(endLayer <= 0 || endLayer > (int)file.layers) endLayer = (int)file.layers;
@@ -2895,6 +2911,10 @@ struct GpuModel {
             glmReset();
             return;
         }
+        if(ink){
+            inkReset();
+            return;
+        }
         if(!ready || !useCuda()) return;
         if(remote) remote->state(STATE_RESET, 0);
         for(int l = firstLayer; l < endLayer; l++){
@@ -3991,7 +4011,7 @@ struct GpuModel {
     std::vector<int> draftPropose(int token, int most) {
         if(gemma) return gemmaPropose(token, most);
         if(hy4) return hyPropose(token, most);
-        if(glm) return {};
+        if(glm || ink) return {};
         settleTail();
         std::vector<int> drafts;
         if(!drafting || draftPendingAt < 0 || most <= 0) return drafts;
@@ -6853,6 +6873,7 @@ struct GpuModel {
         if(gemma) return moveGemma(slot, keep);
         if(hy4) return moveHy4(slot, keep);
         if(glm) return moveGlm(slot, keep);
+        if(ink) return moveInk(slot, keep);
         if(!ready || slot < 0 || slot >= 4 || !useCuda()) return false;
         settleTail();
         if(!keep && !snapshots[slot] && !hostSnapshots[slot]) return false;
@@ -6922,6 +6943,7 @@ struct GpuModel {
         if(gemma) return forwardGemma(ids, positions);
         if(hy4) return forwardHy4(ids, positions);
         if(glm) return forwardGlm(ids, positions);
+        if(ink) return forwardInk(ids, positions);
         settleTail();
         std::vector<float> logits;
         if(!ready || ids.empty() || ids.size() != positions.size()) return logits;
@@ -7150,3 +7172,4 @@ struct GpuModel {
 #include "hy4run.h"
 #include "hy4draft.h"
 #include "glm5run.h"
+#include "inkrun.h"

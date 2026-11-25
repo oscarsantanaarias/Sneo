@@ -604,7 +604,8 @@ inline Json parseToolText(const std::string& text, int index, const Json& tools)
         args = writeJson(params);
     } else if(direct.kind == JSON_OBJECT && direct.has("name")){
         name = direct["name"].str();
-        args = direct["arguments"].kind == JSON_TEXT ? direct["arguments"].text : writeJson(direct["arguments"]);
+        const Json& given = direct.has("arguments") ? direct["arguments"] : direct["args"];
+        args = given.kind == JSON_TEXT ? given.text : writeJson(given);
     } else {
         size_t fn = text.find("<function=");
         if(fn != std::string::npos){

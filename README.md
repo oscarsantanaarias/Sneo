@@ -41,6 +41,7 @@ Made by Oscar Santana, a developer from the Dominican Republic: [LinkedIn](https
 | Hy4-flash Q4_K_M (preview) | Tencent, 512 experts, 12B active | 157 GB | [AngelSlim/Hy4-flash-GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF), see [Hy4-flash](#hy4-flash-preview) |
 | GLM-5.3-Flash Coder IQ2_XXS (preview) | Z.ai, 152 of 288 experts, made for code | 47 GB | [lapadatbogdan/GLM-5.3-Flash-Coder-RCO-152E-GGUF](https://huggingface.co/lapadatbogdan/GLM-5.3-Flash-Coder-RCO-152E-GGUF), see [GLM-5.3-Flash](#glm-53-flash-preview) |
 | GLM-5.3-Flash UD-Q2_K_XL (preview) | Z.ai, 288 experts, 18B active | 109 GB | [unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) |
+| Inkling-2-Mini UD-Q4_K_XL (preview) | Thinking Machines, 128 experts, 26B with 2.7B active | 16 GB | [unsloth/Inkling-2-Mini-GGUF](https://huggingface.co/unsloth/Inkling-2-Mini-GGUF), see [Inkling-2-Mini](#inkling-2-mini-preview) |
 
 The same models as GGUF files from Hugging Face load too, and so do other quantizations of them, as long as their tensors are of these types: IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q2_0, Q4_K, Q5_K, Q5_1, Q6_K, Q8_0, NVFP4, MXFP4, F16, BF16 and F32 (for example the usual Q4_K_M, Q5_K_M, Q6_K and Q8_0 files, and the NVFP4 ones that keep a scale per expert).
 
@@ -72,6 +73,13 @@ Each step of writing goes to the card in one launch: the card stops at every lay
 Z.ai's GLM-5.3-Flash runs in Sneo: linear attention in 34 of its 45 layers, compressed attention that looks at the 2048 tokens its selector picks in the other 11, four residual streams and 288 experts with 18B active parameters per token. The Coder file keeps 152 experts per layer in 47 GB, so it sits whole in RAM next to a 24 GB card.
 
 - On an RTX 3090 with 96 GB of RAM the Coder file loads in about 10 s, reads long prompts at about 300 tok/s and writes at about 20 tok/s on its first run. The experts you use most move to the card and the list is kept in `profiles\<model>.glmheat`, so later runs start warm.
+- Tool calls work with the coding agent. Pictures are not read yet.
+
+### Inkling-2-Mini (preview)
+
+Inkling-2-Mini runs in Sneo: 24 layers where the middle 12 run three times, attention over the last 1024 tokens in most layers and over the whole prompt in every sixth, short convolutions on keys and values, and 128 experts with about 2.7B active parameters per token. The UD-Q4_K_XL file is 16 GB and sits whole on a 24 GB card.
+
+- On an RTX 3090 it loads in about 8 s, reads long prompts at about 700 tok/s and writes at about 75 tok/s. The first load after an update builds the GPU kernels, about a minute more.
 - Tool calls work with the coding agent. Pictures are not read yet.
 
 ### Where to put them

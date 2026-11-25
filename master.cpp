@@ -2037,6 +2037,8 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     options.hy = hyModel;
     bool glmModel = brain.gpu && brain.gpu->glm;
     options.glm = glmModel;
+    bool inkModel = brain.gpu && brain.gpu->ink;
+    options.ink = inkModel;
     std::string prompt, error;
     if(!renderChat(request.messages, request.tools, options, prompt, error)){
         replyHttp(client, 400, problemJson(error));
@@ -2123,6 +2125,37 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     if(glmModel){
         hooks.closeThinking = "</think>";
         hooks.plainKeys = true;
+    }
+    int inkPart = 0;
+    if(inkModel){
+        int modelMark = tokenizer.find("<|message_model|>"), thinking = tokenizer.find("<|content_thinking|>"), plain = tokenizer.find("<|content_text|>");
+        int invoke = tokenizer.find("<|content_invoke_tool_json|>"), ending = tokenizer.find("<|end_message|>");
+        hooks.piece = [&, modelMark, thinking, plain, invoke, ending](int id){
+            if(id == modelMark){
+                inkPart = 1;
+                return std::string();
+            }
+            if(id == thinking){
+                inkPart = 2;
+                return stream.push("<think>");
+            }
+            if(id == plain){
+                inkPart = 3;
+                return std::string();
+            }
+            if(id == invoke){
+                inkPart = 4;
+                return stream.push("<tool_call>");
+            }
+            if(id == ending){
+                std::string closing = inkPart == 2 ? "</think>" : inkPart == 4 ? "</tool_call>" : "";
+                inkPart = 0;
+                return closing.empty() ? closing : stream.push(closing);
+            }
+            if(inkPart == 1) return std::string();
+            return stream.push(tokenizer.tokenText(id));
+        };
+        hooks.closeThinking = "<|end_message|>";
     }
     if(gemmaModel){
         hooks.thinkOpen = "<|channel>thought";
@@ -2310,7 +2343,7 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     std::cout << "generated " << result.outputTokens << " tokens (" << record.outputSpeed << " tok/s), prompt " << result.promptTokens << " tokens with " << result.cachedTokens << " reused (" << record.promptSpeed << " tok/s), drafts kept " << result.kept << " of " << result.drafted << ", model " << result.modelMs << " ms of " << result.outputMs << " ms decoding, vram hit " << hit << "%";
     if(result.drafted) std::cout << ", propose " << proposeMs << " ms, verify " << verifyMs << " ms (draft feed " << (brain.gpu->feedMs - feedBefore) << " ms), snapshot " << markMs << " ms, commit " << commitMs << " ms";
     if(result.copied) std::cout << ", copied from the prompt " << result.copyKept << " of " << result.copied;
-    if(brain.gpu && !brain.gpu->gemma && !brain.gpu->hy4 && !brain.gpu->glm){
+    if(brain.gpu && !brain.gpu->gemma && !brain.gpu->hy4 && !brain.gpu->glm && !brain.gpu->ink){
         unsigned long long probeMemory[3] = {0, 0, 0};
         NvmlLink& probeNv = nvmlLink();
         if(probeNv.ready) probeNv.getMemory(probeNv.device, probeMemory);
@@ -2415,6 +2448,7 @@ void handleClient(SOCKET client) {
         counted.gemma = brain.gpu && brain.gpu->gemma;
         counted.hy = brain.gpu && brain.gpu->hy4;
         counted.glm = brain.gpu && brain.gpu->glm;
+        counted.ink = brain.gpu && brain.gpu->ink;
         if(!renderChat(chat["messages"], chat["tools"], counted, prompt, error)){
             replyHttp(client, 400, "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":" + quoteJson(error) + "}}");
             closesocket(client);
@@ -2782,7 +2816,7 @@ void handleClient(SOCKET client) {
         }
         {
             std::lock_guard<std::mutex> held(preparing.lock);
-            out << ",\"architectures\":[\"qwen4exp\",\"qwen35moe\",\"qwen35\",\"gemma4\",\"hy_v4_flash\",\"glm5-next\"]";
+            out << ",\"architectures\":[\"qwen4exp\",\"qwen35moe\",\"qwen35\",\"gemma4\",\"hy_v4_flash\",\"glm5-next\",\"inkling2_loop\"]";
             out << ",\"prepare\":{\"task\":" << quoteJson(preparing.task) << ",\"done\":" << preparing.done << ",\"total\":" << preparing.total
                 << ",\"problem\":" << quoteJson(preparing.problem) << ",\"note\":" << quoteJson(preparing.note) << "}";
         }

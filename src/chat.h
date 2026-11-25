@@ -14,6 +14,7 @@ struct ChatOptions {
     bool gemma = false;
     bool hy = false;
     bool glm = false;
+    bool ink = false;
 };
 
 struct ToolCall {
@@ -641,7 +642,114 @@ inline bool renderGlm(const Json& messages, const Json& tools, const ChatOptions
     return true;
 }
 
+inline std::string inkJson(const Json& v) {
+    if(v.kind == JSON_OBJECT){
+        std::vector<std::pair<std::string, Json>> fields = v.fields;
+        std::sort(fields.begin(), fields.end(), [](const auto& a, const auto& b){ return a.first < b.first; });
+        std::string out = "{";
+        for(size_t i = 0; i < fields.size(); i++) out += (i ? "," : "") + quoteJson(fields[i].first) + ":" + inkJson(fields[i].second);
+        return out + "}";
+    }
+    if(v.kind == JSON_LIST){
+        std::string out = "[";
+        for(size_t i = 0; i < v.items.size(); i++) out += (i ? "," : "") + inkJson(v.items[i]);
+        return out + "]";
+    }
+    return writeJson(v);
+}
+
+inline bool renderInk(const Json& messages, const Json& tools, const ChatOptions& options, std::string& prompt, std::string& error) {
+    prompt.clear();
+    if(messages.kind != JSON_LIST || messages.items.empty()){
+        error = "No messages provided.";
+        return false;
+    }
+    std::string effort =
+        (options.thinking.has_value() && !*options.thinking) || options.effort == "none" ? "0" :
+        options.effort == "minimal" ? "0.1" :
+        options.effort == "low" ? "0.2" :
+        options.effort == "medium" ? "0.7" :
+        options.effort == "xhigh" || options.effort == "max" ? "0.99" :
+        "0.9";
+    std::string effortText = "<|message_system|><|content_text|>Thinking effort level: " + effort + "<|end_message|>";
+    if(tools.kind == JSON_LIST && !tools.items.empty()){
+        Json specs;
+        specs.kind = JSON_LIST;
+        for(const Json& tool : tools.items){
+            const Json& f = tool.has("function") ? tool["function"] : tool;
+            Json spec;
+            spec.kind = JSON_OBJECT;
+            Json description, name, type;
+            description.kind = name.kind = type.kind = JSON_TEXT;
+            description.text = f["description"].str();
+            name.text = f["name"].str();
+            type.text = tool["type"].str("function");
+            Json parameters = f["parameters"];
+            if(parameters.kind != JSON_OBJECT){
+                parameters = Json();
+                parameters.kind = JSON_OBJECT;
+            }
+            spec.fields = {{"description", description}, {"name", name}, {"parameters", parameters}, {"type", type}};
+            specs.items.push_back(spec);
+        }
+        prompt += "<|message_system|>tool_declare<|content_xml|>" + inkJson(specs) + "<|end_message|>";
+    }
+    bool emitted = false;
+    const std::vector<Json>& list = messages.items;
+    for(size_t i = 0; i < list.size(); i++){
+        const Json& m = list[i];
+        std::string role = m["role"].str();
+        if(role == "developer") role = "system";
+        if(role != "system" && role != "user" && role != "assistant" && role != "tool"){
+            error = "Unexpected message role.";
+            return false;
+        }
+        if(!emitted && role != "system"){
+            prompt += effortText;
+            emitted = true;
+        }
+        std::string text;
+        if(!renderContent(m["content"], role == "system", text, error)) return false;
+        if(role == "system" || role == "user"){
+            prompt += (role == "system" ? "<|message_system|>" : "<|message_user|>") + std::string("<|content_text|>") + text + "<|end_message|>";
+            continue;
+        }
+        if(role == "tool"){
+            std::string name = m["name"].str();
+            std::string id = m["tool_call_id"].str();
+            for(size_t k = 0; name.empty() && !id.empty() && k < i; k++){
+                const Json& calls = list[k]["tool_calls"];
+                for(const Json& call : calls.items){
+                    if(call["id"].str() == id) name = (call.has("function") ? call["function"] : call)["name"].str();
+                }
+            }
+            prompt += "<|message_tool|>" + name + "<|content_text|>" + text + "<|end_message|>";
+            continue;
+        }
+        std::string reasoning = m["reasoning_content"].str(m["reasoning"].str());
+        const Json& calls = m["tool_calls"];
+        bool hasCalls = calls.kind == JSON_LIST && !calls.items.empty();
+        if(!reasoning.empty()) prompt += "<|message_model|><|content_thinking|>" + reasoning + "<|end_message|>";
+        if(!text.empty() || (!hasCalls && reasoning.empty())) prompt += "<|message_model|><|content_text|>" + text + "<|end_message|>";
+        for(size_t c = 0; hasCalls && c < calls.items.size(); c++){
+            const Json& f = calls.items[c].has("function") ? calls.items[c]["function"] : calls.items[c];
+            std::string name = f["name"].str();
+            Json args = f["arguments"];
+            if(args.kind == JSON_TEXT) args = parseJson(args.text);
+            std::vector<std::pair<std::string, Json>> fields = args.kind == JSON_OBJECT ? args.fields : std::vector<std::pair<std::string, Json>>();
+            std::sort(fields.begin(), fields.end(), [](const auto& a, const auto& b){ return a.first < b.first; });
+            std::string body;
+            for(size_t k = 0; k < fields.size(); k++) body += (k ? "," : "") + quoteJson(fields[k].first) + ":" + writeJson(fields[k].second);
+            prompt += "<|message_model|>" + name + "<|content_invoke_tool_json|>{\"name\":" + quoteJson(name) + ",\"args\":{" + body + "}}<|end_message|>";
+        }
+        prompt += "<|content_model_end_sampling|>";
+    }
+    if(!emitted) prompt += effortText;
+    return true;
+}
+
 inline bool renderChat(const Json& messages, const Json& tools, const ChatOptions& options, std::string& prompt, std::string& error) {
+    if(options.ink) return renderInk(messages, tools, options, prompt, error);
     if(options.glm) return renderGlm(messages, tools, options, prompt, error);
     if(options.hy) return renderHy(messages, tools, options, prompt, error);
     if(options.gemma) return renderGemma(messages, tools, options, prompt, error);

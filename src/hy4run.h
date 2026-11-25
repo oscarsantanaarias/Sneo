@@ -1102,7 +1102,7 @@ inline void GpuModel::hySaveHeat() {
     size_t warm = 0;
     for(uint32_t v : hyCache.heat) warm += v ? 1 : 0;
     if(warm < (size_t)std::max(1, hyCache.slots / 4)){
-        std::cout << "hy_v4_flash: heat map with only " << warm << " used experts after " << hyCache.total << " uses, the saved one is kept" << std::endl;
+        std::cout << (glm ? "glm5-next" : "hy_v4_flash") << ": heat map with only " << warm << " used experts after " << hyCache.total << " uses, the saved one is kept" << std::endl;
         return;
     }
     std::string temp = hyCache.heatPath + ".part";
@@ -1183,7 +1183,7 @@ inline void GpuModel::hyFillRam() {
     }
     for(std::thread& t : readers) t.join();
     double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    std::cout << "hy_v4_flash: " << chosen.size() << " of " << order.size() << " cpu experts read into ram (" << gb(want) << " GB) in " << (int)seconds << " s, the rest stay on disk until used" << std::endl;
+    std::cout << (glm ? "glm5-next" : "hy_v4_flash") << ": " << chosen.size() << " of " << order.size() << " cpu experts read into ram (" << gb(want) << " GB) in " << (int)seconds << " s, the rest stay on disk until used" << std::endl;
 }
 
 // ram libre en GB para ver en el registro si la ram se llena mientras escribe

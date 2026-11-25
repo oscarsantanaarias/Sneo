@@ -595,14 +595,24 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         } else hyNormRows(b.xin, d, b.hq, d, L.norm, 0, n, 1, d, s.eps);
     }
     check("the attention input");
-    inkProject(L.q, hq, b.q, n);
-    inkProject(L.rel, hq, b.rel, n);
-    inkProject(L.gate, hq, b.gateRaw, n);
-    inkProject(L.sink, hq, b.sink, n);
-    inkProject(L.k, hk, b.k, n);
-    if(L.full) inkProject(L.kProj, hk, b.dynK, n);
-    inkProject(L.v, hv, b.v, n);
-    if(L.full) inkProject(L.vProj, hv, b.dynV, n);
+    uint64_t packedFrom = 0;
+    auto fromPacked = [&](const GpuMatrix& m, uint64_t input, uint64_t output){
+        if(m.type == 0 || m.type == 30 || m.type == 1){
+            inkProject(m, input, output, n);
+            return;
+        }
+        if(packedFrom != input) hyPack(input, n * m.cols, 0);
+        packedFrom = input;
+        project(m, input, 0, output, n);
+    };
+    fromPacked(L.q, hq, b.q);
+    fromPacked(L.rel, hq, b.rel);
+    fromPacked(L.gate, hq, b.gateRaw);
+    fromPacked(L.sink, hq, b.sink);
+    fromPacked(L.k, hk, b.k);
+    if(L.full) fromPacked(L.kProj, hk, b.dynK);
+    fromPacked(L.v, hv, b.v);
+    if(L.full) fromPacked(L.vProj, hv, b.dynV);
     check("the projections");
     go("inkClip", spread * 24, 1, 128, 1, b.q, L.qClip, b.positions, 24, 128, s.qkClip, L.full ? 1 : 0, s.logAlpha, s.logFloor);
     go("inkClip", spread * 24, 1, 32, 1, b.rel, L.relClip, b.positions, 24, 16, s.relClip, L.full ? 1 : 0, s.logAlpha, s.logFloor);

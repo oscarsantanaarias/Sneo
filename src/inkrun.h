@@ -120,6 +120,7 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
 
     std::vector<std::pair<const TensorInfo*, uint64_t*>> wanted;
     std::vector<std::pair<const TensorInfo*, uint64_t*>> widened;
+    std::vector<std::pair<const TensorInfo*, uint64_t*>> halved;
     auto matrix = [&](const std::string& name, GpuMatrix& out) {
         const TensorInfo* t = findTensor(file, name);
         if(!t || (!knownType(t->type) && t->type != 0)){
@@ -145,6 +146,14 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
             return;
         }
         widened.push_back({t, &out});
+    };
+    auto halves = [&](const std::string& name, uint64_t& out) {
+        const TensorInfo* t = findTensor(file, name);
+        if(!t){
+            if(problem.empty()) problem = "missing tensor " + name;
+            return;
+        }
+        halved.push_back({t, &out});
     };
 
     const TensorInfo* table = findTensor(file, "token_embd.weight");
@@ -186,7 +195,7 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
         floats(p + "ffn_post_conv.weight", L.ffnConv);
         floats(p + "ffn_res_query.weight", L.ffnQuery);
         floats(p + "ffn_norm.weight", L.ffnNorm);
-        floats(p + "ffn_gate_inp.weight", L.router);
+        halves(p + "ffn_gate_inp.weight", L.router);
         floats(p + "exp_probs_b.bias", L.routerBias);
         floats(p + "ffn_gate_up_exps.scale", L.guScale, true);
         floats(p + "ffn_down_exps.scale", L.dScale, true);
@@ -205,9 +214,9 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
         if(L.loop){
             const char* kinds[4] = {"q", "k", "v", "ffn"};
             for(int k = 0; k < 4; k++){
-                floats(p + "loop_" + kinds[k] + "_ctrl_down.weight", L.ctrlDown[k]);
-                floats(p + "loop_" + kinds[k] + "_ctrl_forget.weight", L.ctrlForget[k]);
-                floats(p + "loop_" + kinds[k] + "_ctrl_gain.weight", L.ctrlGain[k]);
+                halves(p + "loop_" + kinds[k] + "_ctrl_down.weight", L.ctrlDown[k]);
+                halves(p + "loop_" + kinds[k] + "_ctrl_forget.weight", L.ctrlForget[k]);
+                halves(p + "loop_" + kinds[k] + "_ctrl_gain.weight", L.ctrlGain[k]);
             }
             floats(p + "loop_msg_query.weight", L.msgQuery);
         }
@@ -243,12 +252,13 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
 
     uint64_t widenedBytes = 0;
     for(auto& w : widened) widenedBytes += (w.first->elements * 4 + 255) / 256 * 256;
+    for(auto& w : halved) widenedBytes += (w.first->elements * 2 + 255) / 256 * 256;
     for(auto& w : wanted) denseBytes += (w.first->bytes + 255) / 256 * 256;
     auto q8Bytes = [](const GpuMatrix& m){
-        return m.type == 8 ? (uint64_t)m.rows * m.cols + (uint64_t)m.rows * (m.cols / 32) * 2 + 512 : 0ULL;
+        return (m.type == 8 || m.type == 30) ? (uint64_t)m.rows * m.cols + (uint64_t)m.rows * (m.cols / 32) * 2 + 512 : 0ULL;
     };
     uint64_t alignedBytes = q8Bytes(head);
-    for(const InkLayer& L : inkLayers) alignedBytes += q8Bytes(L.q) + q8Bytes(L.k) + q8Bytes(L.v) + q8Bytes(L.gate) + q8Bytes(L.rel) + q8Bytes(L.out);
+    for(const InkLayer& L : inkLayers) alignedBytes += q8Bytes(L.q) + q8Bytes(L.k) + q8Bytes(L.v) + q8Bytes(L.gate) + q8Bytes(L.rel) + q8Bytes(L.out) + (L.sink.type == 30 ? q8Bytes(L.sink) : 0ULL) + q8Bytes(L.kProj) + q8Bytes(L.vProj);
     denseBytes += widenedBytes;
 
     const char* rowsAsked = getenv("SNEO_INK_ROWS");
@@ -304,6 +314,19 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
         if(!dst.values || !dst.scales) return;
         go("inkSplitQ8", (unsigned int)(((uint64_t)m.rows * (m.cols / 32) + 7) / 8), 1, 32, 8, m.data, m.stride, dst.values, dst.scales, m.rows, m.cols);
     };
+    auto alignBF16 = [&](const GpuMatrix& m, InkQ8& dst){
+        if(m.type != 30) return;
+        dst.rows = m.rows;
+        dst.cols = m.cols;
+        dst.values = grab((uint64_t)m.rows * m.cols);
+        dst.scales = grab((uint64_t)m.rows * (m.cols / 32) * 2);
+        if(!dst.values || !dst.scales) return;
+        go("inkSplitBF16ToQ8", (unsigned int)(((uint64_t)m.rows * (m.cols / 32) + 7) / 8), 1, 32, 8, m.data, dst.values, dst.scales, m.rows, m.cols);
+    };
+    auto alignAny = [&](const GpuMatrix& m, InkQ8& dst){
+        alignQ8(m, dst);
+        alignBF16(m, dst);
+    };
     alignQ8(head, b.headA);
     for(InkLayer& L : inkLayers){
         alignQ8(L.q, L.qA);
@@ -312,6 +335,11 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
         alignQ8(L.gate, L.gateA);
         alignQ8(L.rel, L.relA);
         alignQ8(L.out, L.outA);
+        alignBF16(L.sink, L.sinkA);
+        if(L.full){
+            alignAny(L.kProj, L.kProjA);
+            alignAny(L.vProj, L.vProjA);
+        }
     }
     if(waitStream() != 0) return false;
     for(auto& w : widened){
@@ -327,6 +355,37 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
             return false;
         }
         used += (full.size() * 4 + 255) / 256 * 256;
+    }
+    auto f32ToF16 = [](float f) -> uint16_t {
+        uint32_t x;
+        memcpy(&x, &f, 4);
+        uint32_t s = (x >> 16) & 0x8000u, m = x & 0x7fffffu;
+        int e = (int)((x >> 23) & 0xffu) - 127 + 15;
+        if(e <= 0){
+            if(e < -10) return (uint16_t)s;
+            uint32_t m1 = (m | 0x800000u) >> (1 - e);
+            return (uint16_t)(s | ((m1 + 0x1000u) >> 13));
+        }
+        if(e >= 31) return (uint16_t)(s | 0x7c00u);
+        uint32_t r = m + 0x1000u;
+        if(r & 0x800000u){ r = 0; e++; if(e >= 31) return (uint16_t)(s | 0x7c00u); }
+        return (uint16_t)(s | (e << 10) | (r >> 13));
+    };
+    for(auto& w : halved){
+        const TensorInfo* t = w.first;
+        int cols = (int)t->dims[0];
+        uint64_t rows = t->elements / cols;
+        uint64_t stride = rowBytes(t->type, cols);
+        std::vector<float> full((size_t)t->elements);
+        for(uint64_t r = 0; r < rows; r++) dequantRow(t->type, host(t) + r * stride, full.data() + r * cols, cols);
+        std::vector<uint16_t> outH((size_t)t->elements);
+        for(size_t i = 0; i < full.size(); i++) outH[i] = f32ToF16(full[i]);
+        *w.second = arena + used;
+        if(cudaLink().copyUp(arena + used, outH.data(), outH.size() * 2) != 0){
+            problem = "cannot copy " + t->name + " to the gpu";
+            return false;
+        }
+        used += (outH.size() * 2 + 255) / 256 * 256;
     }
 
     inkRuns.assign(s.runs, InkRun());
@@ -345,9 +404,16 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
     }
     for(int i = 0; i < 2; i++) b.h[i] = grab(C * d * 4);
     for(int i = 0; i < 4; i++) b.blocks[i] = grab(C * d * 4);
-    for(int i = 0; i < 4; i++) b.msgs[i] = grab(C * d * 4);
     b.prevBlock = grab(C * d * 4);
     b.prevH = grab(C * d * 4);
+    int loopLayers = s.loopEnd - s.loopStart;
+    if(loopLayers > 0){
+        b.msgQueries = grab((uint64_t)loopLayers * 8);
+        std::vector<uint64_t> qPtrs(loopLayers);
+        for(int i = 0; i < loopLayers; i++) qPtrs[i] = inkLayers[s.loopStart + i].msgQuery;
+        if(b.msgQueries) cudaLink().copyUp(b.msgQueries, qPtrs.data(), qPtrs.size() * 8);
+        b.msgWeights = grab(C * (uint64_t)loopLayers * 4 * 2 * 4);
+    }
     b.xin = grab(C * d * 4);
     b.hq = grab(C * d * 4);
     b.hk = grab(C * d * 4);
@@ -582,7 +648,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
     unsigned int spread = (unsigned int)n;
     unsigned int resThreads = n <= s.fewRows ? 1024 : 256;
     auto blocks = [](uint64_t c){ return (unsigned int)((c + 255) / 256); };
-    PackedInput& pk = packs[0];
+    PackedInput& pk = packs[0], & pk1 = packs[1];
     uint64_t none = 0;
     static const bool debug = getenv("SNEO_INK_DEBUG") != nullptr;
     auto check = [&](const char* where){
@@ -593,6 +659,8 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         }
     };
     uint64_t st[5] = {b.blocks[0], b.blocks[1], b.blocks[2], b.blocks[3], none};
+    int totalQ = (s.loopEnd - s.loopStart) * 4;
+    int layerQ = (l - s.loopStart) * 4;
     auto blockRes = [&](uint64_t partial, int cnt, uint64_t query, int queries, uint64_t o0, uint64_t o1, uint64_t o2, uint64_t o3){
         if(n <= s.fewRows){
             go("inkBlockDots", spread, 9, 256, 1, st[0], st[1], st[2], st[3], partial, cnt, query, queries, b.scratch, d);
@@ -600,12 +668,12 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         } else go("inkBlockRes", spread, 1, resThreads, 1, st[0], st[1], st[2], st[3], partial, cnt, query, queries, o0, o1, o2, o3, d, s.eps);
     };
     auto gate = [&](uint64_t from, int k, uint64_t into){
-        go("inkMsgDown", spread, (unsigned int)((s.rank + 3) / 4), 128, 1, from, b.msgs[k], L.ctrlDown[k], b.gates, d, s.rank, s.eps);
-        go("inkMsgMix", (unsigned int)((d + 7) / 8), spread, 256, 1, from, b.msgs[k], b.gates, L.ctrlForget[k], L.ctrlGain[k], into, d, s.rank);
+        go("inkMsgDown", spread, (unsigned int)((s.rank + 15) / 16), 256, 1, from, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ + k, L.ctrlDown[k], b.gates, d, s.rank, s.eps);
+        go("inkMsgMix", (unsigned int)((d + 7) / 8), spread, 256, 1, from, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ + k, b.gates, L.ctrlForget[k], L.ctrlGain[k], into, d, s.rank);
     };
     auto gate3 = [&](uint64_t f0, uint64_t o0, uint64_t f1, uint64_t o1, uint64_t f2, uint64_t o2){
-        go("inkMsgDown3", spread, (unsigned int)(3 * ((s.rank + 3) / 4)), 128, 1, f0, b.msgs[0], L.ctrlDown[0], f1, b.msgs[1], L.ctrlDown[1], f2, b.msgs[2], L.ctrlDown[2], b.gates, d, s.rank, s.eps);
-        go("inkMsgMix3", (unsigned int)((d + 7) / 8), spread * 3, 256, 1, f0, b.msgs[0], L.ctrlForget[0], L.ctrlGain[0], o0, f1, b.msgs[1], L.ctrlForget[1], L.ctrlGain[1], o1, f2, b.msgs[2], L.ctrlForget[2], L.ctrlGain[2], o2, b.gates, d, s.rank);
+        go("inkMsgDown3", spread, (unsigned int)(3 * ((s.rank + 15) / 16)), 256, 1, f0, L.ctrlDown[0], f1, L.ctrlDown[1], f2, L.ctrlDown[2], b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ, b.gates, d, s.rank, s.eps);
+        go("inkMsgMix3", (unsigned int)((d + 7) / 8), spread * 3, 256, 1, f0, L.ctrlForget[0], L.ctrlGain[0], o0, f1, L.ctrlForget[1], L.ctrlGain[1], o1, f2, L.ctrlForget[2], L.ctrlGain[2], o2, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ, b.gates, d, s.rank);
     };
     uint64_t packedFrom = 0;
     uint64_t hq = b.hq, hk = b.hq, hv = b.hq;
@@ -617,7 +685,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
             go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, h, b.hv, n * d);
         }
         if(messages) gate3(b.hq, b.hq, b.hk, b.hk, b.hv, b.hv);
-        go("inkNorm3", spread * 3, 1, 256, 1, b.hq, L.qNorm, b.hq, b.hk, L.kNorm, b.hk, b.hv, L.vNorm, b.hv, pk.values, pk.scales, pk.sums, d, s.eps);
+        go("inkNorm3", spread * 3, 1, 256, 1, b.hq, L.qNorm, b.hq, b.hk, L.kNorm, b.hk, b.hv, L.vNorm, b.hv, pk.values, pk.scales, pk.sums, pk1.values, pk1.scales, pk1.sums, b.inValues, b.inScales, b.inSums, d, s.eps);
         packedFrom = b.hq;
         hk = b.hk;
         hv = b.hv;
@@ -626,7 +694,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
             if(l > 0) blockRes(h, count, L.resQuery, 1, b.xin, none, none, none);
             else go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, h, b.xin, n * d);
             gate3(b.xin, b.hq, b.xin, b.hk, b.xin, b.hv);
-            go("inkNorm3", spread * 3, 1, 256, 1, b.hq, L.norm, b.hq, b.hk, L.norm, b.hk, b.hv, L.norm, b.hv, pk.values, pk.scales, pk.sums, d, s.eps);
+            go("inkNorm3", spread * 3, 1, 256, 1, b.hq, L.norm, b.hq, b.hk, L.norm, b.hk, b.hv, L.norm, b.hv, pk.values, pk.scales, pk.sums, pk1.values, pk1.scales, pk1.sums, b.inValues, b.inScales, b.inSums, d, s.eps);
             packedFrom = b.hq;
             hk = b.hk;
             hv = b.hv;
@@ -634,8 +702,8 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
             go("inkBlockResNorm", spread, 1, resThreads, 1, st[0], st[1], st[2], st[3], h, count, L.resQuery, L.norm, b.hq, pk.values, pk.scales, pk.sums, d, s.eps);
             packedFrom = b.hq;
         } else {
-            go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, h, b.xin, n * d);
-            hyNormRows(b.xin, d, b.hq, d, L.norm, 0, n, 1, d, s.eps);
+            go("inkNormPack", spread, 1, 256, 1, h, L.norm, b.hq, pk.values, pk.scales, pk.sums, d, s.eps);
+            packedFrom = b.hq;
         }
     }
     check("the attention input");
@@ -649,28 +717,33 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         project(m, input, 0, output, n);
     };
     if(n <= s.fewRows && L.qA.values && L.kA.values && L.vA.values && L.gateA.values && L.relA.values){
-        auto runQ8 = [&](const InkQ8& m0, uint64_t o0, const InkQ8& m1, uint64_t o1, const InkQ8& m2, uint64_t o2, const InkQ8& m3, uint64_t o3, const InkQ8& m4, uint64_t o4, uint64_t input){
-            int total = m0.rows + m1.rows + m2.rows + m3.rows + m4.rows;
-            if(packedFrom != input) hyPack(input, n * m0.cols, 0);
-            packedFrom = input;
-            go("inkRowsQ8", (unsigned int)((total + 7) / 8), spread, 64, 1, m0.values, m0.scales, m0.rows, o0, m1.values, m1.scales, m1.rows, o1, m2.values, m2.scales, m2.rows, o2, m3.values, m3.scales, m3.rows, o3, m4.values, m4.scales, m4.rows, o4, pk.values, pk.scales, m0.cols, n);
+        auto runQ8 = [&](const InkQ8& m0, uint64_t o0, const InkQ8& m1, uint64_t o1, const InkQ8& m2, uint64_t o2, const InkQ8& m3, uint64_t o3, const InkQ8& m4, uint64_t o4, const InkQ8& m5, uint64_t o5, uint64_t pkV, uint64_t pkS){
+            int total = m0.rows + m1.rows + m2.rows + m3.rows + m4.rows + m5.rows;
+            int perBlock = total <= 4096 ? 4 : 8;
+            go("inkRowsQ8", (unsigned int)((total + perBlock - 1) / perBlock), spread, (unsigned int)(perBlock * 8), 1, m0.values, m0.scales, m0.rows, o0, m1.values, m1.scales, m1.rows, o1, m2.values, m2.scales, m2.rows, o2, m3.values, m3.scales, m3.rows, o3, m4.values, m4.scales, m4.rows, o4, m5.values, m5.scales, m5.rows, o5, pkV, pkS, m0.cols, n);
         };
         InkQ8 z;
         if(hq == hk && hk == hv){
-            runQ8(L.qA, b.q, L.relA, b.rel, L.gateA, b.gateRaw, L.kA, b.k, L.vA, b.v, hq);
-            inkProject(L.sink, hq, b.sink, n);
-        } else {
-            runQ8(L.qA, b.q, L.relA, b.rel, L.gateA, b.gateRaw, z, none, z, none, hq);
-            inkProject(L.sink, hq, b.sink, n);
-            if(hk == hv){
-                runQ8(L.kA, b.k, L.vA, b.v, z, none, z, none, z, none, hk);
-            } else {
-                runQ8(L.kA, b.k, z, none, z, none, z, none, z, none, hk);
-                runQ8(L.vA, b.v, z, none, z, none, z, none, z, none, hv);
+            if(L.sinkA.values) runQ8(L.qA, b.q, L.relA, b.rel, L.gateA, b.gateRaw, L.kA, b.k, L.vA, b.v, L.sinkA, b.sink, pk.values, pk.scales);
+            else {
+                runQ8(L.qA, b.q, L.relA, b.rel, L.gateA, b.gateRaw, L.kA, b.k, L.vA, b.v, z, none, pk.values, pk.scales);
+                inkProject(L.sink, hq, b.sink, n);
             }
-            if(L.full){
-                inkProject(L.kProj, hk, b.dynK, n);
-                inkProject(L.vProj, hv, b.dynV, n);
+        } else {
+            if(L.sinkA.values) runQ8(L.qA, b.q, L.relA, b.rel, L.gateA, b.gateRaw, L.sinkA, b.sink, z, none, z, none, pk.values, pk.scales);
+            else {
+                runQ8(L.qA, b.q, L.relA, b.rel, L.gateA, b.gateRaw, z, none, z, none, z, none, pk.values, pk.scales);
+                inkProject(L.sink, hq, b.sink, n);
+            }
+            if(L.full && L.kProjA.values) runQ8(L.kA, b.k, L.kProjA, b.dynK, z, none, z, none, z, none, z, none, pk1.values, pk1.scales);
+            else {
+                runQ8(L.kA, b.k, z, none, z, none, z, none, z, none, z, none, pk1.values, pk1.scales);
+                if(L.full) inkProject(L.kProj, hk, b.dynK, n);
+            }
+            if(L.full && L.vProjA.values) runQ8(L.vA, b.v, L.vProjA, b.dynV, z, none, z, none, z, none, z, none, b.inValues, b.inScales);
+            else {
+                runQ8(L.vA, b.v, z, none, z, none, z, none, z, none, z, none, b.inValues, b.inScales);
+                if(L.full) inkProject(L.vProj, hv, b.dynV, n);
             }
         }
     } else {
@@ -700,19 +773,19 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         int most = (int)std::max<uint64_t>(1, b.scratchFloats / ((uint64_t)m * 24 * 130));
         int span = std::max(16, (reach + most - 1) / most);
         int splits = std::max(1, (reach + span - 1) / span);
-        go("inkAttendPart", 6, (unsigned int)(m * splits), 128, 1, b.q + 4ULL * first * 3072, R.kCache, R.vCache, R.ring, b.positions + 4ULL * first, b.rel + 4ULL * first * 384, L.relBank, b.scratch, 24, 8, window, s.extent, scale, span, splits);
+        go("inkAttendPart", 8, (unsigned int)(m * splits), 96, 1, b.q + 4ULL * first * 3072, R.kCache, R.vCache, R.ring, b.positions + 4ULL * first, b.rel + 4ULL * first * 384, L.relBank, b.scratch, 24, 8, window, s.extent, scale, span, splits);
         go("inkAttendMerge", 24, (unsigned int)m, 128, 1, b.scratch, b.sink + 4ULL * first * 24, b.attn + 4ULL * first * 3072, 24, splits);
     }
     check("the attention");
     go("hyGateMulPack", (unsigned int)(((uint64_t)n * 3072 / 32 + 7) / 8), 1, 32, 8, b.attn, b.gateRaw, n * 3072, pk.values, pk.scales, pk.sums);
-    if(n <= s.fewRows && L.outA.values) go("inkRowsQ8", (unsigned int)((L.outA.rows + 7) / 8), spread, 64, 1, L.outA.values, L.outA.scales, L.outA.rows, b.proj, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, pk.values, pk.scales, L.outA.cols, n);
+    if(n <= s.fewRows && L.outA.values) go("inkRowsQ8", (unsigned int)((L.outA.rows + 3) / 4), spread, 32, 1, L.outA.values, L.outA.scales, L.outA.rows, b.proj, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, pk.values, pk.scales, L.outA.cols, n);
     else project(L.out, b.attn, 0, b.proj, n);
     check("the output projection");
     int inner = count;
     if(boundary >= 0){
-        go("inkConvAdd", blocks(d), 1, 256, 1, b.proj, L.postConv, R.postHist, none, b.resid, n, d);
+        go("inkConvAdd", (unsigned int)((d + 63) / 64), 1, 64, 1, b.proj, L.postConv, R.postHist, none, b.resid, n, d);
         inner = count + 1;
-    } else go("inkConvAdd", blocks(d), 1, 256, 1, b.proj, L.postConv, R.postHist, h, b.resid, n, d);
+    } else go("inkConvAdd", (unsigned int)((d + 63) / 64), 1, 64, 1, b.proj, L.postConv, R.postHist, h, b.resid, n, d);
     bool xnPacked = false;
     if(messages){
         blockRes(b.resid, inner, L.ffnQuery, 1, b.mlpIn, none, none, none);
@@ -724,7 +797,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         xnPacked = n <= s.fewRows && (L.gateUp.type == 40 || L.gateUp.type == 8) && (L.down.type == 40 || L.down.type == 8);
     }
     check("the mlp input");
-    go("inkF32Wide", (unsigned int)s.experts, spread, 128, 1, L.router, b.xn, d, b.logits, s.experts, d);
+    go("inkWide16", (unsigned int)s.experts, spread, 128, 1, L.router, b.xn, d, b.logits, s.experts, d);
     go("inkRouteFast", spread, 1, 32, 1, b.logits, L.routerBias, b.ids, b.weights, s.experts, s.used, s.routeScale);
     check("the router");
     if(xnPacked){
@@ -734,7 +807,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         go(downName, (unsigned int)((d + 7) / 8), (unsigned int)n, 256, 1, L.down.data, L.down.stride, L.downBytes, b.ids, b.weights, L.dScale, b.hidValues, b.hidScales, b.hidSums, b.moe, d, s.expertWidth, s.used, tables);
     } else inkExperts(L, n);
     check("the experts");
-    go("inkConvAdd", blocks(d), 1, 256, 1, b.moe, L.ffnConv, R.ffnHist, b.resid, next, n, d);
+    go("inkConvAdd", (unsigned int)((d + 63) / 64), 1, 64, 1, b.moe, L.ffnConv, R.ffnHist, b.resid, next, n, d);
 }
 
 inline bool GpuModel::inkChunk(const int* ids, const int* positions, int n, bool last) {
@@ -782,13 +855,13 @@ inline bool GpuModel::inkChunk(const int* ids, const int* positions, int n, bool
             go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, b.h[at], b.prevH, n * d);
             go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, b.blocks[s.loopStart / s.block], b.h[at], n * d);
             count = preCount;
-            for(int l = s.loopStart; l < s.loopEnd && !failed; l++){
-                if(n <= s.fewRows){
-                    go("inkBlockDots", (unsigned int)n, 9, 256, 1, b.prevBlock, none, none, none, b.prevH, 1, inkLayers[l].msgQuery, 4, b.scratch, d);
-                    go("inkBlockMix", (unsigned int)n, 9, 256, 1, b.prevBlock, none, none, none, b.prevH, 1, b.scratch, 4, b.msgs[0], b.msgs[1], b.msgs[2], b.msgs[3], d, s.eps);
-                } else go("inkBlockRes", (unsigned int)n, 1, 256, 1, b.prevBlock, none, none, none, b.prevH, 1, inkLayers[l].msgQuery, 4, b.msgs[0], b.msgs[1], b.msgs[2], b.msgs[3], d, s.eps);
-                step(l, true);
+            int loopLayers = s.loopEnd - s.loopStart;
+            if(loopLayers > 0){
+                int blocksY = (d + 255) / 256;
+                go("inkAllMsgDots", (unsigned int)n, (unsigned int)blocksY, 256, 1, b.prevBlock, b.prevH, b.msgQueries, b.scratch, d, loopLayers, blocksY);
+                go("inkAllMsgWeights", (unsigned int)n, 1, 64, 1, b.scratch, b.msgWeights, d, s.eps, loopLayers * 4, blocksY);
             }
+            for(int l = s.loopStart; l < s.loopEnd && !failed; l++) step(l, true);
         }
         for(int l = s.loopEnd; l < s.layers && !failed; l++) step(l, false);
         if(!last || failed) return;
@@ -797,7 +870,7 @@ inline bool GpuModel::inkChunk(const int* ids, const int* positions, int n, bool
         for(int k = 0; k < 4; k++) st[k] = b.blocks[k] + 4ULL * (n - 1) * d;
         go("inkBlockResNorm", 1, 1, 1024, 1, st[0], st[1], st[2], st[3], lastRow, count, b.outQuery, b.outNorm, b.last, packs[0].values, packs[0].scales, packs[0].sums, d, s.eps);
         if(b.headA.values){
-            go("inkRowsQ8", (unsigned int)((b.headA.rows + 7) / 8), 1, 64, 1, b.headA.values, b.headA.scales, b.headA.rows, b.vocab, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, packs[0].values, packs[0].scales, b.headA.cols, 1);
+            go("inkRowsQ8", (unsigned int)((b.headA.rows + 7) / 8), 1, 64, 1, b.headA.values, b.headA.scales, b.headA.rows, b.vocab, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, packs[0].values, packs[0].scales, b.headA.cols, 1);
         } else inkProject(head, b.last, b.vocab, 1);
         go("inkHead", blocks(s.vocab), 1, 256, 1, b.vocab, s.vocab, s.unpadded, s.softcap);
         int keep = shortlist > 0 ? shortlist : 0;

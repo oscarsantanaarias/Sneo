@@ -188,7 +188,9 @@ struct Tokenizer {
     // hy_v4 corta primero los numeros de a tres y los trozos chinos o japoneses y despues el resto
     bool hySplit = false;
     bool glmSplit = false;
+    bool inkSplit = false;
     std::vector<std::string> byteText;
+    std::vector<uint8_t> cases;
     std::vector<int> stops;
     std::string chatTemplate;
     std::mutex cacheLock;
@@ -212,7 +214,8 @@ struct Tokenizer {
         auto pre = model.meta.find("tokenizer.ggml.pre");
         hySplit = pre != model.meta.end() && pre->second.text == "hy_v4";
         glmSplit = pre != model.meta.end() && pre->second.text == "glm4";
-        if(pre != model.meta.end() && pre->second.text != "qwen35" && !hySplit && !glmSplit){
+        inkSplit = pre != model.meta.end() && pre->second.text == "inkling2";
+        if(pre != model.meta.end() && pre->second.text != "qwen35" && !hySplit && !glmSplit && !inkSplit){
             error = "unsupported pre-tokenizer " + pre->second.text;
             return false;
         }
@@ -241,6 +244,17 @@ struct Tokenizer {
         }
         for(uint32_t c : {0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x20, 0x85, 0xA0, 0x1680, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000}) kinds[c] = KIND_SPACE;
         for(uint32_t c = 0x2000; c <= 0x200A; c++) kinds[c] = KIND_SPACE;
+        if(inkSplit){
+            cases.assign(0x110000, 0);
+            for(int32_t c = 0; c < 0x110000; c++){
+                int8_t type = charType(c);
+                cases[c] =
+                    type == 1 || type == 3 ? 1 :
+                    type == 2 ? 2 :
+                    (type >= 4 && type <= 8) || (type == 0 && (kinds[c] & (KIND_LETTER | KIND_MARK))) ? 3 :
+                    0;
+            }
+        }
 
         tokens = tokenList->second.texts;
         types.assign(tokens.size(), 1);
@@ -270,7 +284,7 @@ struct Tokenizer {
                 return false;
             }
             byteToken[b] = found->second;
-            if(glmSplit) byteText.push_back(single);
+            if(glmSplit || inkSplit) byteText.push_back(single);
         }
 
         pieces.assign(tokens.size(), "");
@@ -325,6 +339,12 @@ struct Tokenizer {
         addBos = metaWhole(model, "tokenizer.ggml.add_bos_token", 0) != 0;
         auto chat = model.meta.find("tokenizer.chat_template");
         chatTemplate = chat == model.meta.end() ? "" : chat->second.text;
+        if(inkSplit){
+            for(const char* name : {"<|message_user|>", "<|message_system|>"}){
+                int id = find(name);
+                if(id >= 0) stops.push_back(id);
+            }
+        }
         if(glmSplit){
             for(const char* key : {"tokenizer.ggml.eot_token_id", "tokenizer.ggml.eom_token_id"}){
                 int id = (int)metaWhole(model, key, (uint32_t)-1);
@@ -553,7 +573,7 @@ struct Tokenizer {
             auto hit = cache.find(word);
             if(hit != cache.end()) return hit->second;
         }
-        if(glmSplit){
+        if(glmSplit || inkSplit){
             std::string whole;
             for(unsigned char c : word) whole += byteText[c];
             auto found = vocab.find(whole);
@@ -710,6 +730,74 @@ struct Tokenizer {
         }
     }
 
+    void splitInk(const std::vector<uint32_t>& codes, std::vector<std::pair<size_t, size_t>>& parts) const {
+        size_t n = codes.size();
+        auto upper = [&](size_t k){ return k < n && (cases[codes[k]] & 1) != 0; };
+        auto lower = [&](size_t k){ return k < n && (cases[codes[k]] & 2) != 0; };
+        auto letter = [&](size_t k){ return upper(k) || lower(k); };
+        auto lineBreak = [&](size_t k){ return codes[k] == 0x0D || codes[k] == 0x0A; };
+        auto other = [&](size_t k){ return k < n && (kinds[codes[k]] & (KIND_LETTER | KIND_NUMBER | KIND_SPACE)) == 0; };
+        for(size_t i = 0; i < n;){
+            size_t end = 0;
+            size_t start = i;
+            if(!letter(i) && !lineBreak(i) && !(kinds[codes[i]] & (KIND_LETTER | KIND_NUMBER)) && letter(i + 1)) start = i + 1;
+            if(letter(start)){
+                size_t run = start;
+                while(letter(run)) run++;
+                size_t heads = start;
+                while(heads < run && upper(heads)) heads++;
+                size_t found = 0;
+                for(size_t k = heads + 1; k-- > start;){
+                    if(k < run && lower(k)){
+                        size_t tail = k;
+                        while(tail < run && lower(tail)) tail++;
+                        found = tail;
+                        break;
+                    }
+                }
+                if(!found && heads > start){
+                    found = heads;
+                    while(found < run && lower(found)) found++;
+                }
+                if(found){
+                    end = found;
+                    if(end < n && codes[end] == '\'' && end + 1 < n){
+                        uint32_t first = codes[end + 1] | 0x20;
+                        uint32_t second = end + 2 < n ? codes[end + 2] | 0x20 : 0;
+                        if(first == 's' || first == 't' || first == 'm' || first == 'd') end += 2;
+                        else if((first == 'r' && second == 'e') || (first == 'v' && second == 'e') || (first == 'l' && second == 'l')) end += 3;
+                    }
+                }
+            }
+            if(!end && (kinds[codes[i]] & KIND_NUMBER)){
+                end = i + 1;
+                while(end < n && end - i < 3 && (kinds[codes[end]] & KIND_NUMBER)) end++;
+            }
+            if(!end){
+                size_t mark = codes[i] == ' ' && other(i + 1) ? i + 1 : i;
+                if(other(mark)){
+                    end = mark + 1;
+                    while(other(end)) end++;
+                    while(end < n && (lineBreak(end) || codes[end] == '/')) end++;
+                }
+            }
+            if(!end){
+                size_t run = i, lastBreak = n;
+                while(run < n && (kinds[codes[run]] & KIND_SPACE)){
+                    if(lineBreak(run)) lastBreak = run;
+                    run++;
+                }
+                end =
+                    lastBreak < n ? lastBreak + 1 :
+                    run == n || run - i == 1 ? run :
+                    run > i ? run - 1 :
+                    i + 1;
+            }
+            parts.push_back({i, end});
+            i = end;
+        }
+    }
+
     std::vector<int> encode(const std::string& text, bool control = true) {
         if(spm) return encodeSpm(text, control);
         std::vector<int> out;
@@ -744,9 +832,10 @@ struct Tokenizer {
             starts.push_back(at);
 
             size_t n = codes.size();
-            if(hySplit){
+            if(hySplit || inkSplit){
                 std::vector<std::pair<size_t, size_t>> parts;
-                splitHy(codes, parts);
+                if(inkSplit) splitInk(codes, parts);
+                else splitHy(codes, parts);
                 for(const auto& part : parts){
                     std::vector<int> ids = mergeWord(text.substr(starts[part.first], starts[part.second] - starts[part.first]));
                     out.insert(out.end(), ids.begin(), ids.end());

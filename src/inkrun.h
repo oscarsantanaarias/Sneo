@@ -503,6 +503,11 @@ inline void GpuModel::inkExperts(InkLayer& L, int n) {
     PackedInput& p = packs[0];
     uint64_t none = 0;
     auto blocks = [](uint64_t count){ return (unsigned int)((count + 255) / 256); };
+    if(n <= s.fewRows && L.gateUp.type == 30 && L.down.type == 30){
+        go("inkGateUpAct30", (unsigned int)(width / 32), (unsigned int)pairs, 256, 1, L.gateUp.data, L.gateUp.stride, L.gateUpBytes, b.ids, L.guScale, b.xn, b.act, d, width, used, s.gateCap, s.upCap);
+        go("inkDownSum30", (unsigned int)((d + 7) / 8), (unsigned int)n, 256, 1, L.down.data, L.down.stride, L.downBytes, b.ids, b.weights, L.dScale, b.act, b.moe, d, width, used);
+        return;
+    }
     if(n <= s.fewRows && (L.gateUp.type == 40 || L.gateUp.type == 8) && (L.down.type == 40 || L.down.type == 8)){
         hyPack(b.xn, n * d, 0);
         const char* guName = L.gateUp.type == 40 ? "inkGateUpAct40" : "inkGateUpAct8";

@@ -806,6 +806,56 @@ extern "C" __global__ void inkDownSum8(const u8* base, u64 rowBytes, u64 slotByt
     inkDownSumRun<8>(base, rowBytes, slotBytes, ids, weights, dScale, packed, scales, sums, out, hidden, width, used, t);
 }
 
+extern "C" __global__ void inkGateUpAct30(const u8* base, u64 rowBytes, u64 slotBytes, const int* ids, const float* guScale, const float* xn, float* outAct, int hidden, int width, int used, float gateCap, float upCap) {
+    int warp = threadIdx.x >> 5, lane8 = threadIdx.x & 7, chInWarp = (threadIdx.x >> 3) & 3;
+    int c = blockIdx.x * 32 + warp * 4 + chInWarp, j = blockIdx.y;
+    int e = ids[j], tok = j / used;
+    const u8* expert = base + slotBytes * (u64)e;
+    const u16* gRow = (const u16*)(expert + rowBytes * (u64)c);
+    const u16* uRow = (const u16*)(expert + rowBytes * (u64)(width + c));
+    const float* xRow = xn + (u64)tok * hidden;
+    float gAcc = 0.0f, uAcc = 0.0f;
+    for(int i = lane8; i < hidden; i += 8){
+        float xv = xRow[i];
+        gAcc += __uint_as_float((u32)gRow[i] << 16) * xv;
+        uAcc += __uint_as_float((u32)uRow[i] << 16) * xv;
+    }
+    for(int s = 4; s > 0; s >>= 1){
+        gAcc += __shfl_xor_sync(0xffffffff, gAcc, s);
+        uAcc += __shfl_xor_sync(0xffffffff, uAcc, s);
+    }
+    if(lane8 == 0){
+        float sc = guScale ? guScale[e] : 1.0f;
+        float g = gAcc * sc, u = uAcc * sc;
+        outAct[(u64)j * width + c] = tanhf(g / gateCap) * gateCap * hySigmoid(g) * tanhf(u / upCap) * upCap;
+    }
+}
+
+extern "C" __global__ void inkDownSum30(const u8* base, u64 rowBytes, u64 slotBytes, const int* ids, const float* weights, const float* dScale, const float* act, float* out, int hidden, int width, int used) {
+    __shared__ int shExp[32];
+    __shared__ float shWeight[32];
+    int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    int c = blockIdx.x * 8 + warp, tok = blockIdx.y;
+    if(threadIdx.x < used){
+        int j = tok * used + threadIdx.x;
+        int e = ids[j];
+        shExp[threadIdx.x] = e;
+        shWeight[threadIdx.x] = weights[j] * (dScale ? dScale[e] : 1.0f);
+    }
+    __syncthreads();
+    if(c >= hidden) return;
+    float total = 0.0f;
+    for(int k = 0; k < used; k++){
+        const u16* row = (const u16*)(base + slotBytes * (u64)shExp[k] + rowBytes * (u64)c);
+        const float* x = act + (u64)(tok * used + k) * width;
+        float acc = 0.0f;
+        for(int i = lane; i < width; i += 32) acc += __uint_as_float((u32)row[i] << 16) * x[i];
+        total += acc * shWeight[k];
+    }
+    for(int s = 16; s > 0; s >>= 1) total += __shfl_xor_sync(0xffffffff, total, s);
+    if(lane == 0) out[(u64)tok * hidden + c] = total;
+}
+
 extern "C" __global__ void inkHead(float* logits, int count, int unpadded, float cap) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if(i >= count) return;

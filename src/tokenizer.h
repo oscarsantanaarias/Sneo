@@ -187,6 +187,8 @@ struct Tokenizer {
     bool spm = false;
     // hy_v4 corta primero los numeros de a tres y los trozos chinos o japoneses y despues el resto
     bool hySplit = false;
+    bool glmSplit = false;
+    std::vector<std::string> byteText;
     std::vector<int> stops;
     std::string chatTemplate;
     std::mutex cacheLock;
@@ -209,7 +211,8 @@ struct Tokenizer {
 
         auto pre = model.meta.find("tokenizer.ggml.pre");
         hySplit = pre != model.meta.end() && pre->second.text == "hy_v4";
-        if(pre != model.meta.end() && pre->second.text != "qwen35" && !hySplit){
+        glmSplit = pre != model.meta.end() && pre->second.text == "glm4";
+        if(pre != model.meta.end() && pre->second.text != "qwen35" && !hySplit && !glmSplit){
             error = "unsupported pre-tokenizer " + pre->second.text;
             return false;
         }
@@ -267,6 +270,7 @@ struct Tokenizer {
                 return false;
             }
             byteToken[b] = found->second;
+            if(glmSplit) byteText.push_back(single);
         }
 
         pieces.assign(tokens.size(), "");
@@ -321,6 +325,12 @@ struct Tokenizer {
         addBos = metaWhole(model, "tokenizer.ggml.add_bos_token", 0) != 0;
         auto chat = model.meta.find("tokenizer.chat_template");
         chatTemplate = chat == model.meta.end() ? "" : chat->second.text;
+        if(glmSplit){
+            for(const char* key : {"tokenizer.ggml.eot_token_id", "tokenizer.ggml.eom_token_id"}){
+                int id = (int)metaWhole(model, key, (uint32_t)-1);
+                if(id >= 0 && id < (int)tokens.size()) stops.push_back(id);
+            }
+        }
 
         std::lock_guard<std::mutex> hold(cacheLock);
         cache.clear();
@@ -543,6 +553,12 @@ struct Tokenizer {
             auto hit = cache.find(word);
             if(hit != cache.end()) return hit->second;
         }
+        if(glmSplit){
+            std::string whole;
+            for(unsigned char c : word) whole += byteText[c];
+            auto found = vocab.find(whole);
+            if(found != vocab.end()) return {found->second};
+        }
 
         struct Candidate {
             uint32_t rank;
@@ -752,20 +768,25 @@ struct Tokenizer {
 
                 if(!end){
                     size_t word = i;
-                    if(c != '\r' && c != '\n' && !(kind & (KIND_LETTER | KIND_NUMBER)) && i + 1 < n && (kinds[codes[i + 1]] & (KIND_LETTER | KIND_MARK))) word = i + 1;
-                    if(kinds[codes[word]] & (KIND_LETTER | KIND_MARK)){
+                    uint8_t letters = glmSplit ? KIND_LETTER : (KIND_LETTER | KIND_MARK);
+                    if(c != '\r' && c != '\n' && !(kind & (KIND_LETTER | KIND_NUMBER)) && i + 1 < n && (kinds[codes[i + 1]] & letters)) word = i + 1;
+                    if(kinds[codes[word]] & letters){
                         end = word + 1;
-                        while(end < n && (kinds[codes[end]] & (KIND_LETTER | KIND_MARK))) end++;
+                        while(end < n && (kinds[codes[end]] & letters)) end++;
                     }
                 }
 
-                if(!end && (kind & KIND_NUMBER)) end = i + 1;
+                if(!end && (kind & KIND_NUMBER)){
+                    end = i + 1;
+                    while(glmSplit && end < n && end - i < 3 && (kinds[codes[end]] & KIND_NUMBER)) end++;
+                }
 
                 if(!end){
-                    size_t mark = c == ' ' && i + 1 < n && kinds[codes[i + 1]] == 0 ? i + 1 : i;
-                    if(kinds[codes[mark]] == 0){
+                    auto loose = [&](size_t k){ return glmSplit ? (kinds[codes[k]] & (KIND_LETTER | KIND_NUMBER | KIND_SPACE)) == 0 : kinds[codes[k]] == 0; };
+                    size_t mark = c == ' ' && i + 1 < n && loose(i + 1) ? i + 1 : i;
+                    if(loose(mark)){
                         end = mark + 1;
-                        while(end < n && kinds[codes[end]] == 0) end++;
+                        while(end < n && loose(end)) end++;
                         while(end < n && (codes[end] == '\r' || codes[end] == '\n')) end++;
                     }
                 }

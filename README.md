@@ -39,6 +39,8 @@ Made by Oscar Santana, a developer from the Dominican Republic: [LinkedIn](https
 | Gemma 4 26B | Mixture of experts | 16 GB | `gemma4:26b` in Ollama, its draft assistant comes along and makes writing faster |
 | Gemma 4 31B | Dense | 17 GB | `gemma4:31b` in Ollama, its draft assistant comes along and makes writing faster |
 | Hy4-flash Q4_K_M (preview) | Tencent, 512 experts, 12B active | 157 GB | [AngelSlim/Hy4-flash-GGUF](https://huggingface.co/AngelSlim/Hy4-flash-GGUF), see [Hy4-flash](#hy4-flash-preview) |
+| GLM-5.3-Flash Coder IQ2_XXS (preview) | Z.ai, 152 of 288 experts, made for code | 47 GB | [lapadatbogdan/GLM-5.3-Flash-Coder-RCO-152E-GGUF](https://huggingface.co/lapadatbogdan/GLM-5.3-Flash-Coder-RCO-152E-GGUF), see [GLM-5.3-Flash](#glm-53-flash-preview) |
+| GLM-5.3-Flash UD-Q2_K_XL (preview) | Z.ai, 288 experts, 18B active | 109 GB | [unsloth/GLM-5.3-Flash-GGUF](https://huggingface.co/unsloth/GLM-5.3-Flash-GGUF) |
 
 The same models as GGUF files from Hugging Face load too, and so do other quantizations of them, as long as their tensors are of these types: IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, Q2_0, Q4_K, Q5_K, Q5_1, Q6_K, Q8_0, NVFP4, MXFP4, F16, BF16 and F32 (for example the usual Q4_K_M, Q5_K_M, Q6_K and Q8_0 files, and the NVFP4 ones that keep a scale per expert).
 
@@ -64,6 +66,13 @@ Tencent's Hy4-flash runs in Sneo. It is big: 157 GB at Q4_K_M and 12B active par
 - The first load after an update builds the GPU kernels, about a minute more; after that a load takes about a minute. The experts used most stay on the card and the list is kept in `profiles\Hy4-flash-Q4_K_M.hy4heat`, so it starts warm and gets faster as you use it.
 
 Each step of writing goes to the card in one launch: the card stops at every layer that needs experts from RAM, the CPU computes them and hands them back through shared memory, without going back to the driver. The experts you use move to the card in the background while it writes, so the card keeps the ones your work needs. On an RTX 3090 with 96 GB of DDR5 it reads long prompts at 400 to 500 tok/s, writes code at 60 to 75 tok/s, code at about 60 tok/s with a 10K token prompt like the coding agent's, and prose at about 40 tok/s after a 10K token prompt. Tool calls work with the coding agent.
+
+### GLM-5.3-Flash (preview)
+
+Z.ai's GLM-5.3-Flash runs in Sneo: linear attention in 34 of its 45 layers, compressed attention that looks at the 2048 tokens its selector picks in the other 11, four residual streams and 288 experts with 18B active parameters per token. The Coder file keeps 152 experts per layer in 47 GB, so it sits whole in RAM next to a 24 GB card.
+
+- On an RTX 3090 with 96 GB of RAM the Coder file loads in about 10 s, reads long prompts at about 300 tok/s and writes at about 20 tok/s on its first run. The experts you use most move to the card and the list is kept in `profiles\<model>.glmheat`, so later runs start warm.
+- Tool calls work with the coding agent. Pictures are not read yet.
 
 ### Where to put them
 

@@ -2045,7 +2045,8 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
     }
 
     Tokenizer& tokenizer = *words;
-    int boundaryMark = tokenizer.find(gemmaModel ? "<turn|>" : hyModel ? hyEnd() : "<|im_end|>");
+    int boundaryMark = tokenizer.find(gemmaModel ? "<turn|>" : hyModel ? hyEnd() : inkModel ? "<|end_message|>" : "<|im_end|>");
+    int glmUser = glmModel ? tokenizer.find("<|user|>") : -1, glmTool = glmModel ? tokenizer.find("<|observation|>") : -1;
     bool side = body["sneo_side"].truthy();
     TextStream stream;
     bool first = true;
@@ -2160,10 +2161,13 @@ void generateLocal(SOCKET client, const Json& body, bool messagesApi = false) {
             std::vector<int>& held = brain.tokens();
             size_t have = held.size();
             size_t firstCut = 0, lastCut = 0;
-            for(size_t i = 0; i < ids.size() && boundaryMark >= 0; i++){
-                if(ids[i] != boundaryMark) continue;
-                if(!firstCut) firstCut = i + 1;
-                lastCut = i + 1;
+            for(size_t i = 0; i < ids.size() && (boundaryMark >= 0 || glmUser >= 0); i++){
+                bool ends = boundaryMark >= 0 && ids[i] == boundaryMark && !(inkModel && i + 1 == ids.size());
+                bool opens = i > 0 && (ids[i] == glmUser || ids[i] == glmTool);
+                if(!ends && !opens) continue;
+                size_t cut = opens ? i : i + 1;
+                if(!firstCut) firstCut = cut;
+                lastCut = cut;
             }
             auto matches = [&](const std::vector<int>& mark) {
                 return !mark.empty() && mark.size() < ids.size() && std::equal(mark.begin(), mark.end(), ids.begin());

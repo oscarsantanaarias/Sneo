@@ -263,7 +263,7 @@ inline bool GpuModel::loadInk(const std::string& path, int threads) {
     uint64_t bufferBytes = C * 4 * (d * 14 + 3072 * 3 + 1024 * 2 + 384 + 24 + 64 + 128 + 16 * 3) + pairs * 4 * (2 * width + width + d + 4) + A * s.heads * 130 * 4 * 16
         + (uint64_t)s.vocab * 4 + d * 4 + std::max<uint64_t>(C * 3072, pairs * width) * 2 * 2 + C * d * 2 + pairs * width * 2;
     uint64_t historyBytes = (uint64_t)s.runs * 3 * (1024 * 2 + d * 2) * 4;
-    uint64_t margin = 700ULL << 20;
+    uint64_t margin = 1200ULL << 20;
     uint64_t fixedBytes = denseBytes + bufferBytes + slidingBytes + historyBytes + margin;
     if(fixedBytes >= startFree){
         problem = "inkling2_loop needs " + std::to_string((fixedBytes >> 20) + 1) + " MB of video memory before any context and " + std::to_string(startFree >> 20) + " MB are free";
@@ -426,30 +426,37 @@ inline bool GpuModel::moveInk(int slot, bool keep) {
     InkBuffers& b = inkBuffers;
     if(!ready || slot < 0 || slot >= 4 || !useCuda()) return false;
     uint64_t narrowBytes = 3ULL * 1024 * 4, broadBytes = 3ULL * s.hidden * 4;
-    uint64_t total = (uint64_t)inkRuns.size() * (2 * narrowBytes + 2 * broadBytes);
+    std::vector<std::pair<uint64_t, uint64_t>> parts;
+    for(InkRun& R : inkRuns){
+        parts.push_back({R.kHist, narrowBytes});
+        parts.push_back({R.vHist, narrowBytes});
+        parts.push_back({R.postHist, broadBytes});
+        parts.push_back({R.ffnHist, broadBytes});
+        if(R.ring <= 0) continue;
+        uint64_t cacheBytes = (uint64_t)R.ring * s.kvHeads * 128 * 2;
+        parts.push_back({R.kCache, cacheBytes});
+        parts.push_back({R.vCache, cacheBytes});
+    }
+    uint64_t total = 0;
+    for(auto& part : parts) total += part.second;
     if(waitStream() != 0) return false;
     std::vector<uint8_t>& copy = b.saved[slot];
     if(keep){
         copy.resize((size_t)total);
         uint64_t at = 0;
-        for(InkRun& R : inkRuns){
-            for(auto part : {std::make_pair(R.kHist, narrowBytes), std::make_pair(R.vHist, narrowBytes), std::make_pair(R.postHist, broadBytes), std::make_pair(R.ffnHist, broadBytes)}){
-                if(cudaLink().copyDown(copy.data() + at, part.first, (size_t)part.second) != 0) return false;
-                at += part.second;
-            }
+        for(auto& part : parts){
+            if(cudaLink().copyDown(copy.data() + at, part.first, (size_t)part.second) != 0) return false;
+            at += part.second;
         }
         b.savedTokens[slot] = tokens.size();
         savedTokens[slot] = tokens.size();
         return true;
     }
     if(copy.size() != total || b.savedTokens[slot] > tokens.size()) return false;
-    if(tokens.size() - b.savedTokens[slot] > (size_t)chunk) return false;
     uint64_t at = 0;
-    for(InkRun& R : inkRuns){
-        for(auto part : {std::make_pair(R.kHist, narrowBytes), std::make_pair(R.vHist, narrowBytes), std::make_pair(R.postHist, broadBytes), std::make_pair(R.ffnHist, broadBytes)}){
-            if(cudaLink().copyUp(part.first, copy.data() + at, (size_t)part.second) != 0) return false;
-            at += part.second;
-        }
+    for(auto& part : parts){
+        if(cudaLink().copyUp(part.first, copy.data() + at, (size_t)part.second) != 0) return false;
+        at += part.second;
     }
     tokens.resize(b.savedTokens[slot]);
     return true;

@@ -884,7 +884,7 @@ extern "C" __global__ void inkSplitQ8(const u8* src, u64 rowBytes, i8* values, u
 
 extern "C" __global__ void inkRowsQ8(const i8* v0, const u16* s0, int r0, float* o0, const i8* v1, const u16* s1, int r1, float* o1, const i8* v2, const u16* s2, int r2, float* o2, const i8* v3, const u16* s3, int r3, float* o3, const i8* v4, const u16* s4, int r4, float* o4, const i8* packed, const float* xScales, int cols, int n) {
     int lane8 = threadIdx.x & 7;
-    int row = blockIdx.x * 16 + (threadIdx.x >> 3), tok = blockIdx.y;
+    int row = blockIdx.x * 8 + (threadIdx.x >> 3), tok = blockIdx.y;
     const i8* wv = v0;
     const u16* ws = s0;
     float* out = o0;

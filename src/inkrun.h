@@ -653,7 +653,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
             int total = m0.rows + m1.rows + m2.rows + m3.rows + m4.rows;
             if(packedFrom != input) hyPack(input, n * m0.cols, 0);
             packedFrom = input;
-            go("inkRowsQ8", (unsigned int)((total + 15) / 16), spread, 128, 1, m0.values, m0.scales, m0.rows, o0, m1.values, m1.scales, m1.rows, o1, m2.values, m2.scales, m2.rows, o2, m3.values, m3.scales, m3.rows, o3, m4.values, m4.scales, m4.rows, o4, pk.values, pk.scales, m0.cols, n);
+            go("inkRowsQ8", (unsigned int)((total + 7) / 8), spread, 64, 1, m0.values, m0.scales, m0.rows, o0, m1.values, m1.scales, m1.rows, o1, m2.values, m2.scales, m2.rows, o2, m3.values, m3.scales, m3.rows, o3, m4.values, m4.scales, m4.rows, o4, pk.values, pk.scales, m0.cols, n);
         };
         InkQ8 z;
         if(hq == hk && hk == hv){
@@ -705,7 +705,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
     }
     check("the attention");
     go("hyGateMulPack", (unsigned int)(((uint64_t)n * 3072 / 32 + 7) / 8), 1, 32, 8, b.attn, b.gateRaw, n * 3072, pk.values, pk.scales, pk.sums);
-    if(n <= s.fewRows && L.outA.values) go("inkRowsQ8", (unsigned int)((L.outA.rows + 15) / 16), spread, 128, 1, L.outA.values, L.outA.scales, L.outA.rows, b.proj, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, pk.values, pk.scales, L.outA.cols, n);
+    if(n <= s.fewRows && L.outA.values) go("inkRowsQ8", (unsigned int)((L.outA.rows + 7) / 8), spread, 64, 1, L.outA.values, L.outA.scales, L.outA.rows, b.proj, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, pk.values, pk.scales, L.outA.cols, n);
     else project(L.out, b.attn, 0, b.proj, n);
     check("the output projection");
     int inner = count;
@@ -797,7 +797,7 @@ inline bool GpuModel::inkChunk(const int* ids, const int* positions, int n, bool
         for(int k = 0; k < 4; k++) st[k] = b.blocks[k] + 4ULL * (n - 1) * d;
         go("inkBlockResNorm", 1, 1, 1024, 1, st[0], st[1], st[2], st[3], lastRow, count, b.outQuery, b.outNorm, b.last, packs[0].values, packs[0].scales, packs[0].sums, d, s.eps);
         if(b.headA.values){
-            go("inkRowsQ8", (unsigned int)((b.headA.rows + 15) / 16), 1, 128, 1, b.headA.values, b.headA.scales, b.headA.rows, b.vocab, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, packs[0].values, packs[0].scales, b.headA.cols, 1);
+            go("inkRowsQ8", (unsigned int)((b.headA.rows + 7) / 8), 1, 64, 1, b.headA.values, b.headA.scales, b.headA.rows, b.vocab, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, packs[0].values, packs[0].scales, b.headA.cols, 1);
         } else inkProject(head, b.last, b.vocab, 1);
         go("inkHead", blocks(s.vocab), 1, 256, 1, b.vocab, s.vocab, s.unpadded, s.softcap);
         int keep = shortlist > 0 ? shortlist : 0;

@@ -13,6 +13,7 @@ struct ChatOptions {
     bool keepByDefault = true;
     bool gemma = false;
     bool hy = false;
+    bool glm = false;
 };
 
 struct ToolCall {
@@ -536,7 +537,112 @@ inline bool renderHy(const Json& messages, const Json& tools, const ChatOptions&
     return true;
 }
 
+inline std::string glmJson(const Json& v) {
+    if(v.kind == JSON_OBJECT){
+        std::string out = "{";
+        for(size_t i = 0; i < v.fields.size(); i++) out += (i ? ", " : "") + quoteJson(v.fields[i].first) + ": " + glmJson(v.fields[i].second);
+        return out + "}";
+    }
+    if(v.kind == JSON_LIST){
+        std::string out = "[";
+        for(size_t i = 0; i < v.items.size(); i++) out += (i ? ", " : "") + glmJson(v.items[i]);
+        return out + "]";
+    }
+    return writeJson(v);
+}
+
+inline bool renderGlm(const Json& messages, const Json& tools, const ChatOptions& options, std::string& prompt, std::string& error) {
+    prompt.clear();
+    if(messages.kind != JSON_LIST || messages.items.empty()){
+        error = "No messages provided.";
+        return false;
+    }
+    bool thinking = options.thinking.value_or(true);
+    bool keep = options.keepThinking.value_or(true);
+    std::string effort =
+        options.effort == "low" ? "Low" :
+        options.effort == "high" ? "High" :
+        "Max";
+    prompt = "[gMASK]<sop><|system|>Reasoning Effort: " + effort;
+    if(tools.kind == JSON_LIST && !tools.items.empty()){
+        prompt += "<|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n";
+        for(const Json& tool : tools.items){
+            const Json& t = tool.has("function") ? tool["function"] : tool;
+            if(t["defer_loading"].truthy()) continue;
+            std::string line = "{";
+            bool first = true;
+            for(const auto& field : t.fields){
+                if(field.first == "defer_loading" || field.first == "strict") continue;
+                line += (first ? "" : ", ") + quoteJson(field.first) + ": " + glmJson(field.second);
+                first = false;
+            }
+            prompt += line + "}\n";
+        }
+        prompt += "</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}<arg_key>{arg-key-1}</arg_key><arg_value>{arg-value-1}</arg_value><arg_key>{arg-key-2}</arg_key><arg_value>{arg-value-2}</arg_value>...</tool_call>";
+    }
+    const std::vector<Json>& list = messages.items;
+    int lastUser = -1;
+    for(size_t i = 0; i < list.size(); i++){
+        if(list[i]["role"].str() == "user") lastUser = (int)i;
+    }
+    for(size_t i = 0; i < list.size(); i++){
+        const Json& m = list[i];
+        std::string role = m["role"].str();
+        std::string text;
+        if(role == "tool"){
+            prompt += "<|observation|>";
+            for(; i < list.size() && list[i]["role"].str() == "tool"; i++){
+                if(!renderContent(list[i]["content"], false, text, error)) return false;
+                prompt += "<tool_response>" + text + "</tool_response>";
+            }
+            i--;
+            continue;
+        }
+        if(!renderContent(m["content"], role == "system" || role == "developer", text, error)) return false;
+        if(role == "system" || role == "developer"){
+            prompt += "<|system|>" + text;
+            continue;
+        }
+        if(role == "user"){
+            prompt += "<|user|>" + text;
+            continue;
+        }
+        if(role != "assistant"){
+            error = "Unexpected message role.";
+            return false;
+        }
+        std::string reasoning = m["reasoning"].str(m["reasoning_content"].str());
+        bool known = m["reasoning"].kind == JSON_TEXT || m["reasoning_content"].kind == JSON_TEXT;
+        size_t close = text.find("</think>");
+        if(!known && close != std::string::npos){
+            size_t open = text.rfind("<think>", close);
+            reasoning = text.substr(open == std::string::npos ? 0 : open + 7, close - (open == std::string::npos ? 0 : open + 7));
+            text = text.substr(close + 8);
+            known = true;
+        }
+        bool show = known && (keep || (int)i > lastUser);
+        prompt += "<|assistant|><think>" + (show ? reasoning : std::string()) + "</think>" + trimText(text);
+        const Json& calls = m["tool_calls"];
+        for(size_t c = 0; calls.kind == JSON_LIST && c < calls.items.size(); c++){
+            const Json& f = calls.items[c].has("function") ? calls.items[c]["function"] : calls.items[c];
+            prompt += "<tool_call>" + f["name"].str();
+            Json args = f["arguments"];
+            if(args.kind == JSON_TEXT) args = parseJson(args.text);
+            for(const auto& field : args.fields){
+                prompt += "<arg_key>" + field.first + "</arg_key><arg_value>" + (field.second.kind == JSON_TEXT ? field.second.text : glmJson(field.second)) + "</arg_value>";
+            }
+            prompt += "</tool_call>";
+        }
+    }
+    if(options.generation && list.back()["role"].str() != "assistant"){
+        prompt += "<|assistant|><think>";
+        if(!thinking) prompt += "</think>";
+    }
+    return true;
+}
+
 inline bool renderChat(const Json& messages, const Json& tools, const ChatOptions& options, std::string& prompt, std::string& error) {
+    if(options.glm) return renderGlm(messages, tools, options, prompt, error);
     if(options.hy) return renderHy(messages, tools, options, prompt, error);
     if(options.gemma) return renderGemma(messages, tools, options, prompt, error);
     prompt.clear();

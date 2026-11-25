@@ -58,6 +58,7 @@ struct GenerateHooks {
     int copyLeast = 0;
     int guessStart = 0;
     int contextLimit = 0;
+    bool plainKeys = false;
     std::string thinkOpen = "<think>";
     std::string thinkClose = "</think>";
     std::string toolOpen = "<tool_call>";
@@ -978,7 +979,17 @@ inline GenerateResult runGenerate(SOCKET client, const GenerateRequest& req, Gen
 
     result.toolCalls.kind = JSON_LIST;
     for(size_t i = 0; i < splitter.tools.size(); i++){
-        for(const std::string& one : splitHyCalls(splitter.tools[i])) result.toolCalls.items.push_back(parseToolText(one, (int)result.toolCalls.items.size(), req.tools));
+        std::string text = splitter.tools[i];
+        if(hooks.plainKeys){
+            text = hyMark("tool_call") + text + hyMark("tool_call", true);
+            for(const char* name : {"arg_key", "arg_value"}){
+                for(bool close : {false, true}){
+                    std::string plain = std::string(close ? "</" : "<") + name + ">", marked = hyMark(name, close);
+                    for(size_t at = text.find(plain); at != std::string::npos; at = text.find(plain, at + marked.size())) text.replace(at, plain.size(), marked);
+                }
+            }
+        }
+        for(const std::string& one : splitHyCalls(text)) result.toolCalls.items.push_back(parseToolText(one, (int)result.toolCalls.items.size(), req.tools));
     }
     if(!result.toolCalls.items.empty() && result.finish == "stop") result.finish = "tool_calls";
 

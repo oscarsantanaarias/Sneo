@@ -25,6 +25,7 @@ struct GpuMatrix {
 
 #include "gemma4.h"
 #include "hy4.h"
+#include "glm5.h"
 #include "safetensors.h"
 
 inline std::atomic<bool> stopLoading{false};
@@ -309,6 +310,10 @@ struct GpuModel {
     HyDraft hyDraft;
     int hyTop = 0;
     void* hyRouted = nullptr;
+    bool glm = false;
+    GlmShape glmShape;
+    GlmBuffers glmBuffers;
+    std::vector<GlmLinear> glmLinears;
     FrontLink* remote = nullptr;
     std::vector<float> frontStack;
     // en el nodo del pool: cada parte de filas lista sale apenas se copia de la tarjeta
@@ -645,9 +650,9 @@ struct GpuModel {
         seer.close();
         vramBudget.close();
         processVram.close();
-        if(ready && !hy4) saveHeat();
-        if(ready && hy4) hySaveHeat();
-        if(hy4) hyStopUploads();
+        if(ready && !hy4 && !glm) saveHeat();
+        if(ready && (hy4 || glm)) hySaveHeat();
+        if(hy4 || glm) hyStopUploads();
         if(helper.context) closeHelper();
         warmStop = true;
         if(warmer.joinable()) warmer.join();
@@ -1107,6 +1112,20 @@ struct GpuModel {
     std::vector<std::pair<uint64_t*, uint64_t>> hySubBuffers(int rows);
     bool hyChunk(const int* ids, const int* positions, int n, bool last);
     std::vector<float> forwardHy4(const std::vector<int>& ids, const std::vector<int>& positions);
+    bool loadGlm(const std::string& path, int threads);
+    void glmHcIn(uint64_t fn, uint64_t scale, uint64_t base, uint64_t norm, int n);
+    void glmHcOut(uint64_t x, int n);
+    void glmPacked(const GpuMatrix& m, uint64_t input, uint64_t output, int n);
+    void glmReset();
+    bool moveGlm(int slot, bool keep);
+    void glmLinearPass(int l, int n);
+    void glmAttention(int l, int n);
+    void glmBatch(HyLayer& L, int count);
+    void glmExperts(int l, int n);
+    void glmExpertsWide(int l, int n);
+    void glmLayer(int l, int n);
+    bool glmChunk(const int* ids, const int* positions, int n, bool last);
+    std::vector<float> forwardGlm(const std::vector<int>& ids, const std::vector<int>& positions);
     void gemmaPack(uint64_t input, int count, PackedInput& packed);
     void gemmaExpertRows(const GpuMatrix& m, uint64_t expertBytes, int perToken, uint64_t input, PackedInput& packed, uint64_t output, int slots);
     int gemmaSplits(const GemmaLayer& L, int n, int top);
@@ -1132,6 +1151,7 @@ struct GpuModel {
         file = opened;
         if(file.arch == "gemma4") return loadGemma(path, threads);
         if(file.arch == "hy_v4_flash") return loadHy4(path, threads);
+        if(file.arch == "glm5-next") return loadGlm(path, threads);
         dense = file.arch == "qwen35";
         if(dense) residual = false;
         if(endLayer <= 0 || endLayer > (int)file.layers) endLayer = (int)file.layers;
@@ -2871,6 +2891,10 @@ struct GpuModel {
             hyBuffers.ringTop = -1;
             return;
         }
+        if(glm){
+            glmReset();
+            return;
+        }
         if(!ready || !useCuda()) return;
         if(remote) remote->state(STATE_RESET, 0);
         for(int l = firstLayer; l < endLayer; l++){
@@ -3967,6 +3991,7 @@ struct GpuModel {
     std::vector<int> draftPropose(int token, int most) {
         if(gemma) return gemmaPropose(token, most);
         if(hy4) return hyPropose(token, most);
+        if(glm) return {};
         settleTail();
         std::vector<int> drafts;
         if(!drafting || draftPendingAt < 0 || most <= 0) return drafts;
@@ -6827,6 +6852,7 @@ struct GpuModel {
     bool moveState(int slot, bool keep, bool tell = true) {
         if(gemma) return moveGemma(slot, keep);
         if(hy4) return moveHy4(slot, keep);
+        if(glm) return moveGlm(slot, keep);
         if(!ready || slot < 0 || slot >= 4 || !useCuda()) return false;
         settleTail();
         if(!keep && !snapshots[slot] && !hostSnapshots[slot]) return false;
@@ -6895,6 +6921,7 @@ struct GpuModel {
     std::vector<float> forward(const std::vector<int>& ids, const std::vector<int>& positions) {
         if(gemma) return forwardGemma(ids, positions);
         if(hy4) return forwardHy4(ids, positions);
+        if(glm) return forwardGlm(ids, positions);
         settleTail();
         std::vector<float> logits;
         if(!ready || ids.empty() || ids.size() != positions.size()) return logits;
@@ -7122,3 +7149,4 @@ struct GpuModel {
 #include "gemma4run.h"
 #include "hy4run.h"
 #include "hy4draft.h"
+#include "glm5run.h"

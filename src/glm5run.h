@@ -688,22 +688,33 @@ inline void GpuModel::glmReset() {
 }
 
 inline bool GpuModel::moveGlm(int slot, bool keep) {
+    HyShape& s = hyShape;
     GlmShape& g = glmShape;
     GlmBuffers& gb = glmBuffers;
     if(!ready || slot < 0 || slot >= 4 || !useCuda()) return false;
     uint64_t stateBytes = (uint64_t)g.linearHeads * g.linearDim * g.linearDim * 4;
     uint64_t historyBytes = 3ULL * 3 * g.linearWidth * 4;
-    uint64_t total = (uint64_t)glmLinears.size() * (stateBytes + historyBytes);
+    uint64_t ringBytes = (uint64_t)s.idxRing * 128 * 4;
+    std::vector<std::pair<uint64_t, uint64_t>> parts;
+    for(GlmLinear& K : glmLinears){
+        parts.push_back({K.state, stateBytes});
+        parts.push_back({K.history, historyBytes});
+    }
+    for(int l = 0; l < (int)hyLayers.size(); l++){
+        if(!hyLayers[l].idxKeys || !gb.idxGateRing[l]) continue;
+        parts.push_back({hyLayers[l].idxKeys, ringBytes});
+        parts.push_back({gb.idxGateRing[l], ringBytes});
+    }
+    uint64_t total = 0;
+    for(auto& part : parts) total += part.second;
     if(waitStream() != 0) return false;
     std::vector<uint8_t>& copy = gb.saved[slot];
     if(keep){
         copy.resize((size_t)total);
         uint64_t at = 0;
-        for(GlmLinear& K : glmLinears){
-            if(cudaLink().copyDown(copy.data() + at, K.state, (size_t)stateBytes) != 0) return false;
-            at += stateBytes;
-            if(cudaLink().copyDown(copy.data() + at, K.history, (size_t)historyBytes) != 0) return false;
-            at += historyBytes;
+        for(auto& part : parts){
+            if(cudaLink().copyDown(copy.data() + at, part.first, (size_t)part.second) != 0) return false;
+            at += part.second;
         }
         gb.savedTokens[slot] = tokens.size();
         savedTokens[slot] = tokens.size();
@@ -711,11 +722,9 @@ inline bool GpuModel::moveGlm(int slot, bool keep) {
     }
     if(copy.size() != total || gb.savedTokens[slot] > tokens.size()) return false;
     uint64_t at = 0;
-    for(GlmLinear& K : glmLinears){
-        if(cudaLink().copyUp(K.state, copy.data() + at, (size_t)stateBytes) != 0) return false;
-        at += stateBytes;
-        if(cudaLink().copyUp(K.history, copy.data() + at, (size_t)historyBytes) != 0) return false;
-        at += historyBytes;
+    for(auto& part : parts){
+        if(cudaLink().copyUp(part.first, copy.data() + at, (size_t)part.second) != 0) return false;
+        at += part.second;
     }
     tokens.resize(gb.savedTokens[slot]);
     return true;

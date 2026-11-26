@@ -1546,7 +1546,7 @@ function App(){
         throw new Error(res.message);
       }
 
-      setModels(res.models);
+      setModels(Array.isArray(res.models) ? res.models : []);
       setSettings(prev => ({
         ...prev,
         model: prev.model || res.currentModel
@@ -1657,7 +1657,7 @@ function App(){
         throw new Error(res.message);
       }
 
-      setFiles(res.files);
+      setFiles(Array.isArray(res.files) ? res.files : []);
 
     } catch(e) {
       await uiAlert(e.message);
@@ -1718,7 +1718,7 @@ function App(){
 
   const selectChat = (chat) => {
     setActiveChatId(chat.id);
-    setMessages(chat.messages || []);
+    setMessages(Array.isArray(chat.messages) ? chat.messages : []);
     setProject(chat.project || '');
     setOpenFile('');
     setFileContent('');
@@ -2548,7 +2548,7 @@ function App(){
         }}
       >
         <div className="chat-column">
-        {messages.map((item, index) => (
+        {(Array.isArray(messages) ? messages : []).map((item, index) => (
           <ChatMessage
             key={`${item.role}-${index}`}
             item={item}

@@ -685,6 +685,8 @@ function App(){
   const [liveSteps, setLiveSteps] = useState([]);
   const [liveThoughts, setLiveThoughts] = useState('');
   const [liveStatus, setLiveStatus] = useState('');
+  const [liveSubagents, setLiveSubagents] = useState([]);
+  const [subSteerText, setSubSteerText] = useState({});
   const [prefillLive, setPrefillLive] = useState(null);
   const [lastPrefill, setLastPrefill] = useState(null);
   const [elapsedSecs, setElapsedSecs] = useState(0);
@@ -2259,6 +2261,19 @@ function App(){
             });
           }
 
+          if(event.type === 'subagent' && event.subagent?.id){
+            const sub = event.subagent;
+            setLiveSubagents(prev => {
+              const idx = prev.findIndex(item => item.id === sub.id);
+              if(idx >= 0){
+                const copy = [...prev];
+                copy[idx] = {...copy[idx], ...sub};
+                return copy;
+              }
+              return [...prev, sub];
+            });
+          }
+
           if(event.type === 'tool' && !event.step && !/^[a-z0-9_]+$/.test(String(event.tool || ''))){
             const note = String(event.tool || '');
             setLiveStatus(note === 'generating response...'
@@ -2397,6 +2412,8 @@ function App(){
       setLiveSteps([]);
       setLiveThoughts('');
       setLiveStatus('');
+      setLiveSubagents([]);
+      setSubSteerText({});
       setPrefillLive(null);
       setLiveUsage(null);
       setLiveSpeed(null);
@@ -2579,6 +2596,75 @@ function App(){
                 : liveStatus}
               onOpenFile={openProjectFile}
             />
+            {liveSubagents.length > 0 && (
+              <div className="subagents-live">
+                {liveSubagents.map(sub => {
+                  const isRunning = sub.status === 'running';
+                  const draft = subSteerText[sub.id] || '';
+                  return (
+                    <div key={sub.id} className={`subagent-card subagent-${sub.status || 'running'}`}>
+                      <div className="subagent-head">
+                        <div className="subagent-title">
+                          <strong>{sub.name}</strong>
+                          {sub.role && <span>{sub.role}</span>}
+                        </div>
+                        <div className="subagent-controls">
+                          <span className={`state-pill ${isRunning ? 'pill-busy' : sub.status === 'done' ? 'pill-ok' : 'pill-bad'}`}>
+                            {tr(sub.status === 'done' ? 'Done' : sub.status === 'stopped' ? 'Stopped' : sub.status === 'error' ? 'Error' : 'Working')}
+                          </span>
+                          {isRunning && (
+                            <button
+                              type="button"
+                              className="icon-btn icon-danger"
+                              title={tr('Stop this subagent')}
+                              onClick={() => fetch(`${apiUrl}/api/chat/subagent/stop`, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({chatId: activeChatId, subagentId: sub.id})
+                              }).catch(() => {})}
+                            >
+                              <i className="fa-solid fa-stop"></i>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {(sub.step || sub.thought) && (
+                        <div className="subagent-activity">
+                          {sub.step && <div className="subagent-step">{sub.step}</div>}
+                          {sub.thought && isRunning && <div className="subagent-thought">{sub.thought.slice(-240)}</div>}
+                        </div>
+                      )}
+                      {isRunning && (
+                        <form
+                          className="subagent-steer"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            const msg = draft.trim();
+                            if(!msg) return;
+                            setSubSteerText(prev => ({...prev, [sub.id]: ''}));
+                            fetch(`${apiUrl}/api/chat/subagent/steer`, {
+                              method: 'POST',
+                              headers: {'Content-Type': 'application/json'},
+                              body: JSON.stringify({chatId: activeChatId, subagentId: sub.id, message: msg})
+                            }).catch(() => {});
+                          }}
+                        >
+                          <input
+                            type="text"
+                            value={draft}
+                            onChange={(e) => setSubSteerText(prev => ({...prev, [sub.id]: e.target.value}))}
+                            placeholder={tr('Message {0}...', sub.name)}
+                          />
+                          <button type="submit" className="icon-btn" disabled={!draft.trim()} title={tr('Send')}>
+                            <i className="fa-solid fa-paper-plane"></i>
+                          </button>
+                        </form>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 

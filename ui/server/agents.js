@@ -607,7 +607,34 @@ Deliver clear findings, risks and the next step.
     {role: 'user', content: task}
   ];
   const tools = [];
-  const subRun = run ? {...run, onEvent: null} : null;
+  const liveId = !onStep && run?.onEvent ? `sub_${Date.now()}_${Math.random().toString(36).slice(2, 7)}` : '';
+  const subControl = liveId ? {abort: new AbortController(), steer: []} : null;
+  if(liveId){
+    run.subagents = run.subagents || new Map();
+    run.subagents.set(liveId, subControl);
+  }
+  const subSignal = subControl
+    ? (run?.signal ? AbortSignal.any([run.signal, subControl.abort.signal]) : subControl.abort.signal)
+    : run?.signal;
+  const subRun = run ? {...run, signal: subSignal, onEvent: null} : null;
+  const emitSub = liveId
+    ? (patch) => run.onEvent?.({type: 'subagent', subagent: {id: liveId, name, role, ...patch}})
+    : null;
+  const stepHandler = onStep || (emitSub
+    ? (ev) => {
+        if(ev?.thought) emitSub({status: 'running', thought: ev.thought});
+        else if(ev?.tool) emitSub({status: 'running', step: ev.detail ? `${ev.tool}: ${ev.detail}` : ev.tool});
+      }
+    : null);
+  const drainSubSteer = () => {
+    if(!subControl?.steer.length) return false;
+    while(subControl.steer.length){
+      messages.push({role: 'user', content: `[User message]: ${subControl.steer.shift()}`});
+    }
+    emitSub?.({status: 'running', step: 'Received user message...'});
+    return true;
+  };
+  emitSub?.({status: 'running', step: 'Starting...'});
 
   const repeats = new Map();
   const repeated = (tool, args) => {
@@ -617,13 +644,22 @@ Deliver clear findings, risks and the next step.
     return count > 2;
   };
 
+  try {
   for(let i = 0; i < rounds; i++){
-    if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    if(subSignal?.aborted){
+      emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+      return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    }
+    drainSubSteer();
+    emitSub?.({status: 'running', step: i === 0 ? 'Thinking...' : `Round ${i + 1}...`});
     shrinkResults(messages);
     const reply = route
       ? await askRoute(route, messages, toolList, subRun)
       : await askModelChat(messages, toolList, subRun, model);
-    if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    if(subSignal?.aborted){
+      emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+      return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    }
     const rawAnswer = reply.content || '';
     const answer = rawAnswer
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -633,7 +669,7 @@ Deliver clear findings, risks and the next step.
     const thinking = String(reply.reasoning || (rawAnswer.match(/<think>([\s\S]*?)(<\/think>|$)/i) || [])[1] || '').trim();
 
     if(thinking){
-      onStep?.({thought: thinking.slice(-2000)});
+      stepHandler?.({thought: thinking.slice(-2000)});
     }
 
     if(nativeCalls.length){
@@ -641,9 +677,12 @@ Deliver clear findings, risks and the next step.
       messages.push({role: 'assistant', content: answer, tool_calls: calls.map(call => call.args ? call.item : {...call.item, function: {...call.item.function, arguments: '{}'}}), ...(reply.raw ? {_claude: reply.raw} : {})});
 
       for(const call of calls){
-        if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+        if(subSignal?.aborted){
+          emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+          return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+        }
         const asked = call.item.function?.name || '';
-        onStep?.({tool: asked, detail: stepDetail(call.args)});
+        stepHandler?.({tool: asked, detail: stepDetail(call.args)});
         const resolved = resolveCall(asked, call.args || {}, '');
         const toolName = resolved.name || asked;
         const callArgs = normalizeToolArgs(toolName, resolved.args || {}, null);
@@ -692,6 +731,12 @@ Deliver clear findings, risks and the next step.
     }
 
     if(!calls.length){
+      if(subControl?.steer.length){
+        messages.push({role: 'assistant', content: answer});
+        drainSubSteer();
+        continue;
+      }
+      emitSub?.({status: 'done', step: answer.slice(0, 160)});
       return {name, role, answer, tools};
     }
 
@@ -699,7 +744,10 @@ Deliver clear findings, risks and the next step.
     const results = [];
 
     for(const call of calls){
-      if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+      if(subSignal?.aborted){
+        emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+        return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+      }
       const callArgs = {...(call.args || {})};
 
       await placeCall(call.tool, callArgs, project);
@@ -707,7 +755,7 @@ Deliver clear findings, risks and the next step.
       let result;
       const toolStart = Date.now();
 
-      onStep?.({tool: call.tool, detail: stepDetail(callArgs)});
+      stepHandler?.({tool: call.tool, detail: stepDetail(callArgs)});
 
       try {
         result = repeated(call.tool, callArgs)
@@ -741,17 +789,31 @@ Deliver clear findings, risks and the next step.
       ? await askRoute(route, messages, null, subRun)
       : await askModelChat(messages, null, subRun, model);
     const answer = String(reply.content || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*$/gi, '').trim();
-    if(answer) return {name, role, answer, tools};
+    if(answer){
+      emitSub?.({status: 'done', step: answer.slice(0, 160)});
+      return {name, role, answer, tools};
+    }
   } catch(e) {
     if(run?.signal?.aborted) throw e;
   }
 
+  emitSub?.({status: 'done', step: 'Finished tool calls.'});
   return {
     name,
     role,
     answer: 'The agent used all its tool calls without a final answer.',
     tools
   };
+  } catch(e) {
+    if(subControl?.abort.signal.aborted && !run?.signal?.aborted){
+      emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+      return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    }
+    emitSub?.({status: subSignal?.aborted ? 'stopped' : 'error', step: String(e.message || e)});
+    throw e;
+  } finally {
+    if(liveId) run?.subagents?.delete(liveId);
+  }
 };
 
 const parsePlan = (text, maxN) => {

@@ -965,5 +965,7 @@
   "Enabled": "Activado",
   "Read-only": "Solo lectura",
   "When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.": "Cuando está activado, parallel_agents y orchestrate pueden editar archivos y ejecutar comandos con los mismos permisos de tu workspace.",
-  "Load second only": "Cargar solo el segundo"
+  "Load second only": "Cargar solo el segundo",
+  "Stop this subagent": "Parar este subagente",
+  "Message {0}...": "Hablarle a {0}..."
 }

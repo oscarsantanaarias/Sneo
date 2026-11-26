@@ -897,7 +897,8 @@ const runChat = async ({body, control, onEvent}) => {
     mode: normalizeMode(accessMode || chat?.accessMode, settings.accessMode),
     signal: control.abort.signal,
     onEvent,
-    children: new Set()
+    children: new Set(),
+    subagents: new Map()
   };
 
   control.run = run;
@@ -967,6 +968,32 @@ router.post('/chat/steer', async (req, res) => {
 
   if(text || image){
     control.steer.push({text, image});
+  }
+
+  return res.status(200).json({active: true, queued: true});
+});
+
+router.post('/chat/subagent/stop', async (req, res) => {
+  const sub = liveRuns.get(cleanText(req.body?.chatId))?.run?.subagents?.get(cleanText(req.body?.subagentId));
+
+  if(!sub){
+    return res.status(200).json({active: false});
+  }
+
+  sub.abort.abort();
+  return res.status(200).json({active: true, stopped: true});
+});
+
+router.post('/chat/subagent/steer', async (req, res) => {
+  const sub = liveRuns.get(cleanText(req.body?.chatId))?.run?.subagents?.get(cleanText(req.body?.subagentId));
+  const text = cleanText(req.body?.message);
+
+  if(!sub){
+    return res.status(200).json({active: false});
+  }
+
+  if(text){
+    sub.steer.push(text);
   }
 
   return res.status(200).json({active: true, queued: true});

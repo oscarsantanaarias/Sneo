@@ -93,7 +93,7 @@ export const chatProject = async (asked, active) => {
   return projects.some(item => item.name === wanted) ? wanted : own;
 };
 
-export const listDir = async (dirPath, deep = 0, base = dirPath) => {
+export const listDir = async (dirPath, deep = 0, base = dirPath, budget = null) => {
   const entries = await fs.readdir(dirPath, {withFileTypes: true});
   const cleanEntries = entries
     .filter(item => !['node_modules', '.git', 'dist', 'data'].includes(item.name))
@@ -102,6 +102,11 @@ export const listDir = async (dirPath, deep = 0, base = dirPath) => {
   const items = [];
 
   for(const item of cleanEntries){
+    if(budget && budget.left <= 0){
+      budget.omitted += cleanEntries.length - items.length;
+      break;
+    }
+    if(budget) budget.left--;
     const itemPath = path.join(dirPath, item.name);
     const itemInfo = {
       name: item.name,
@@ -109,8 +114,8 @@ export const listDir = async (dirPath, deep = 0, base = dirPath) => {
       type: item.isDirectory() ? 'folder' : 'file'
     };
 
-    if(item.isDirectory() && deep > 0){
-      itemInfo.children = await listDir(itemPath, deep - 1, base);
+    if(item.isDirectory() && deep > 0 && (!budget || budget.left > 0)){
+      itemInfo.children = await listDir(itemPath, deep - 1, base, budget);
     }
 
     items.push(itemInfo);

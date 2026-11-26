@@ -573,7 +573,7 @@ const stepDetail = (args) => {
 };
 
 // los resultados viejos se recortan para que un agente con muchas vueltas no se pase del contexto
-const toolResultBudget = 150000;
+const toolResultBudget = 300000;
 const isToolResult = (item) => item.role === 'tool' || (item.role === 'user' && /^Tool \S+ result:\n/.test(String(item.content || '')));
 const shrinkResults = (messages) => {
   let total = messages.reduce((sum, item) => sum + String(item.content || '').length, 0);
@@ -674,7 +674,7 @@ Deliver clear findings, risks and the next step.
         }
 
         tools.push({tool: toolName, args: callArgs, result});
-        messages.push({role: 'tool', tool_call_id: call.item.id, content: toon(result).slice(0, 6000)});
+        messages.push({role: 'tool', tool_call_id: call.item.id, content: toon(result).slice(0, canEdit ? 12000 : 6000)});
       }
 
       continue;
@@ -721,7 +721,7 @@ Deliver clear findings, risks and the next step.
       }
 
       tools.push({tool: call.tool, args: callArgs, result});
-      results.push(`Tool ${call.tool} result:\n${toon(result).slice(0, 6000)}`);
+      results.push(`Tool ${call.tool} result:\n${toon(result).slice(0, canEdit ? 12000 : 6000)}`);
     }
 
     i += calls.length - 1;

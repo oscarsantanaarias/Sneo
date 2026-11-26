@@ -291,11 +291,17 @@ export const toolAddProject = async ({projectPath, name}) => {
   return {registered: finalName, path: finalPath};
 };
 
-export const toolListFiles = async ({project}) => {
+export const toolListFiles = async ({project, folder, path: subPath}) => {
   const projectPath = await getProjectPath(project);
   await fs.mkdir(projectPath, {recursive: true});
-
-  return await listDir(projectPath, 3, projectPath);
+  const target = cleanText(folder || subPath);
+  const startDir = target ? safeJoin(projectPath, target) : projectPath;
+  const budget = {left: 400, omitted: 0};
+  const items = await listDir(startDir, 3, projectPath, budget);
+  if(budget.omitted > 0){
+    return {files: items, truncated: true, omitted: budget.omitted, hint: 'Too many files; pass folder/path or use glob/grep to narrow.'};
+  }
+  return items;
 };
 
 export const toolReadFile = async ({project, file}) => {

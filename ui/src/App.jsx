@@ -1,5 +1,5 @@
 import React from 'react';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
@@ -359,7 +359,7 @@ const agoText = (when) => {
           : `${Math.floor(seconds / (86400 * 30))}mo`;
 };
 
-function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
+const ChatMessage = React.memo(function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
   const [changesOpen, setChangesOpen] = useState(true);
   const isUser = item.role === 'user';
 
@@ -462,7 +462,7 @@ function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
       )}
     </div>
   );
-}
+});
 
 function lineDiff(before, after) {
   const a = before.split('\n');
@@ -1778,6 +1778,13 @@ function App(){
     setEditorRequest({path: resolvedPath, line, nonce: Date.now()});
   };
 
+  const openProjectFileRef = useRef(null);
+  openProjectFileRef.current = openProjectFile;
+  const handleOpenProjectFile = useCallback((p, line = 0) => openProjectFileRef.current?.(p, line), []);
+  const runPlanRef = useRef(null);
+  runPlanRef.current = () => sendMessage({text: tr('Run the plan above, step by step.'), mode: 'auto'});
+  const handleRunPlan = useCallback(() => runPlanRef.current?.(), []);
+
   const closeOpenFile = () => {
     setOpenFile('');
     setEditorMax(false);
@@ -2186,7 +2193,7 @@ function App(){
         body: JSON.stringify({
           chatId: activeChatId,
           message: cleanText,
-          history: messages.filter(item => !item.partial),
+          history: messages.filter(item => !item.partial).map(item => ({role: item.role, content: item.content})),
           project,
           reverseTool: settings.reverseTool,
           image: sentImage,
@@ -2542,9 +2549,9 @@ function App(){
           <ChatMessage
             key={`${item.role}-${index}`}
             item={item}
-            onOpenFile={openProjectFile}
+            onOpenFile={handleOpenProjectFile}
             canRunPlan={!loading && index === messages.length - 1}
-            onRunPlan={() => sendMessage({text: tr('Run the plan above, step by step.'), mode: 'auto'})}
+            onRunPlan={handleRunPlan}
           />
         ))}
 

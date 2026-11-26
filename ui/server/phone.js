@@ -207,7 +207,7 @@ const buildPhoneApp = ({apiRoutes, engineRoutes, port}) => {
     return next();
   });
 
-  app.use(express.json({limit: '25mb'}));
+  app.use(express.json({limit: '256mb'}));
 
   app.get('/phone/me', async (req, res) => {
     const device = await findDevice(req);

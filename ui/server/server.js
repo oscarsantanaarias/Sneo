@@ -83,7 +83,7 @@ app.use(async (req, res, next) => {
   return res.status(403).json({message: 'Open SNEO from its own window to use it.'});
 });
 
-app.use(express.json({limit: '25mb'}));
+app.use(express.json({limit: '256mb'}));
 
 app.use(cors({
   origin: (origin, cb) => cb(null, !origin || origins.has(origin) || devOrigins.has(origin)),

@@ -361,6 +361,7 @@ const agoText = (when) => {
 
 const ChatMessage = React.memo(function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
   const [changesOpen, setChangesOpen] = useState(true);
+  if(!item) return null;
   const isUser = item.role === 'user';
 
   if(isUser){
@@ -382,7 +383,8 @@ const ChatMessage = React.memo(function ChatMessage({item, onOpenFile, canRunPla
       continue;
     }
 
-    const target = st.args?.file || st.args?.path || st.file;
+    const target = String(st.args?.file || st.args?.path || st.file || '');
+    if(!target) continue;
     const found = edits.find(entry => entry.target === target);
 
     if(found){

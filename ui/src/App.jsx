@@ -1660,7 +1660,8 @@ function App(){
         throw new Error(res.message);
       }
 
-      setFiles(Array.isArray(res.files) ? res.files : []);
+      const nextFiles = Array.isArray(res.files) ? res.files : (Array.isArray(res.files?.files) ? res.files.files : []);
+      setFiles(nextFiles);
 
     } catch(e) {
       await uiAlert(e.message);

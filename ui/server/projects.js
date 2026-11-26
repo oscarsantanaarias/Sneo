@@ -93,33 +93,59 @@ export const chatProject = async (asked, active) => {
   return projects.some(item => item.name === wanted) ? wanted : own;
 };
 
-export const listDir = async (dirPath, deep = 0, base = dirPath, budget = null) => {
+const readCleanDir = async (dirPath) => {
   const entries = await fs.readdir(dirPath, {withFileTypes: true});
-  const cleanEntries = entries
+  return entries
     .filter(item => !['node_modules', '.git', 'dist', 'data'].includes(item.name))
     .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+};
 
-  const items = [];
-
-  for(const item of cleanEntries){
-    if(budget && budget.left <= 0){
-      budget.omitted += cleanEntries.length - items.length;
-      break;
+export const listDir = async (dirPath, deep = 0, base = dirPath, budget = null) => {
+  if(!budget){
+    const cleanEntries = await readCleanDir(dirPath);
+    const items = [];
+    for(const item of cleanEntries){
+      const itemPath = path.join(dirPath, item.name);
+      const itemInfo = {
+        name: item.name,
+        path: relativePath(base, itemPath),
+        type: item.isDirectory() ? 'folder' : 'file'
+      };
+      if(item.isDirectory() && deep > 0){
+        itemInfo.children = await listDir(itemPath, deep - 1, base, null);
+      }
+      items.push(itemInfo);
     }
-    if(budget) budget.left--;
-    const itemPath = path.join(dirPath, item.name);
-    const itemInfo = {
-      name: item.name,
-      path: relativePath(base, itemPath),
-      type: item.isDirectory() ? 'folder' : 'file'
-    };
-
-    if(item.isDirectory() && deep > 0 && (!budget || budget.left > 0)){
-      itemInfo.children = await listDir(itemPath, deep - 1, base, budget);
-    }
-
-    items.push(itemInfo);
+    return items;
   }
 
-  return items;
+  const rootItems = [];
+  const queue = [{dir: dirPath, depth: deep, target: rootItems}];
+  while(queue.length > 0 && budget.left > 0){
+    const {dir, depth, target} = queue.shift();
+    const cleanEntries = await readCleanDir(dir);
+    const share = queue.length > 0 ? Math.max(25, Math.ceil(budget.left / (queue.length + 1))) : budget.left;
+    const cap = Math.min(budget.left, share);
+    let added = 0;
+    for(const item of cleanEntries){
+      if(added >= cap){
+        budget.omitted += cleanEntries.length - added;
+        break;
+      }
+      budget.left--;
+      added++;
+      const itemPath = path.join(dir, item.name);
+      const itemInfo = {
+        name: item.name,
+        path: relativePath(base, itemPath),
+        type: item.isDirectory() ? 'folder' : 'file'
+      };
+      if(item.isDirectory() && depth > 0){
+        itemInfo.children = [];
+        queue.push({dir: itemPath, depth: depth - 1, target: itemInfo.children});
+      }
+      target.push(itemInfo);
+    }
+  }
+  return rootItems;
 };

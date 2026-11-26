@@ -470,7 +470,8 @@ router.post('/projects/pick', async (req, res) => {
 
 router.get('/projects/:project/files', async (req, res) => {
   try {
-    return res.status(200).json({files: await toolListFiles({project: req.params.project})});
+    const out = await toolListFiles({project: req.params.project, maxItems: 2500});
+    return res.status(200).json(Array.isArray(out) ? {files: out} : out);
   } catch(err) {
     return res.status(500).json({message: err.message});
   }

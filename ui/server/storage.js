@@ -149,6 +149,7 @@ export const readSettings = async () => {
     thinkDepth: ['off', 'light', 'normal', 'deep', 'full'].includes(data.thinkDepth) ? data.thinkDepth : 'normal',
     thinkCap: [0, 2048, 8192, 32768].includes(Number(data.thinkCap)) ? Number(data.thinkCap) : 0,
     reverseTool: ['auto', 'ghidra', 'ida'].includes(data.reverseTool) ? data.reverseTool : 'auto',
+    agentEdits: data.agentEdits !== false,
     ghidraPort: Number(data.ghidraPort) || Number(process.env.GHIDRA_PORT) || 5093,
     idaPort: Number(data.idaPort) || Number(process.env.IDA_PORT) || 5073,
     providerBaseUrl: data.providerBaseUrl || 'http://localhost:8000/v1',

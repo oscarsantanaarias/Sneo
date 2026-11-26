@@ -523,11 +523,15 @@ export const toolParallelAgents = async ({project, task, agents}, run) => {
     {name: 'Tester', role: 'Test in sandbox and summarize results.'}
   ];
 
+  const settings = await readSettings();
+  const canEdit = settings.agentEdits !== false;
   const results = await Promise.all(cleanAgents.slice(0, 5).map(agent => runSubAgent({
     name: cleanText(agent.name) || 'Subagent',
     role: cleanText(agent.role) || 'Review',
     task: cleanTask,
     project: cleanProject,
+    rounds: canEdit ? 12 : 6,
+    canEdit,
     run
   })));
 
@@ -559,7 +563,7 @@ ${parts.join('\n\n')}`;
 };
 
 // las herramientas que suma un agente que escribe codigo, con los mismos permisos que el workspace
-const editTools = ['replace_in_file', 'write_file', 'create_folder', 'rename_path', 'run_command'];
+const editTools = ['replace_in_file', 'write_file', 'create_folder', 'rename_path', 'delete_path', 'run_command'];
 
 // lo que se muestra al lado de cada herramienta en el panel del agente
 const stepDetail = (args) => {
@@ -590,12 +594,12 @@ ${persona || `You are subagent ${name}. Role: ${role}.\nYou work in parallel wit
 Active project: ${project || 'none'}.
 
 Allowed tools (call them with native function calling):
-list_files, read_file, read_range, glob, grep, search_files, ghidra, ida, re_search, sandbox_run, git_status, git_diff, codebase_search${canEdit ? ', replace_in_file, write_file, create_folder, rename_path, run_command' : ''}.
+list_files, read_file, read_range, glob, grep, search_files, ghidra, ida, re_search, sandbox_run, git_status, git_diff, codebase_search${canEdit ? ', replace_in_file, write_file, create_folder, rename_path, delete_path, run_command, web_search, fetch_url' : ''}.
 
-${canEdit ? 'Change files with replace_in_file (exact text to replace) and write_file only for new files. Read a file before you edit it. After editing, run it to check it works.' : 'Do not write or delete files.'}
+${canEdit ? 'You have the same workspace permissions as the main agent. Change files with replace_in_file (exact text to replace) and write_file for new files. Read a file before you edit it. After editing, run it to check it works.' : 'Do not write or delete files.'}
 Deliver clear findings, risks and the next step.
 `.trim();
-  const toolList = canEdit ? [...subAgentToolSchemas, ...toolSchemas.filter(item => editTools.includes(item.function?.name))] : subAgentToolSchemas;
+  const toolList = canEdit ? toolSchemas.filter(item => !['parallel_agents', 'orchestrate'].includes(item.function?.name)) : subAgentToolSchemas;
 
   const messages = [
     {role: 'system', content: system},
@@ -650,13 +654,13 @@ Deliver clear findings, risks and the next step.
           result = {error: 'Arguments were not valid JSON, nothing was run. Send the call again with valid JSON arguments.'};
         } else if(resolved.error){
           result = {error: resolved.error, hint: resolved.hint};
-        } else if(resolved.calls){
+        } else if(resolved.calls && !canEdit){
           result = {error: 'Subagents can only read. Report the change you would make instead.'};
         } else {
           try {
             result = repeated(toolName, callArgs)
               ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
-              : canEdit && editTools.includes(toolName)
+              : canEdit
                 ? await runTool(toolName, callArgs)
                 : await runSubTool(toolName, callArgs);
           } catch(e) {
@@ -704,7 +708,7 @@ Deliver clear findings, risks and the next step.
       try {
         result = repeated(call.tool, callArgs)
           ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
-          : canEdit && editTools.includes(call.tool)
+          : canEdit
             ? await runTool(call.tool, callArgs)
             : await runSubTool(call.tool, callArgs);
       } catch(e) {
@@ -775,6 +779,7 @@ const MODE_PLAN = {
 
 export const orchestrate = async ({project, task, mode, maxAgents, onEvent, run}) => {
   const settings = await readSettings();
+  const canEdit = settings.agentEdits !== false;
   const subRun = run ? {...run, onEvent: null} : null;
   const bigModel = cleanText(settings.model) || 'qwen3-coder:30b';
   const workerModel = 'qwen2.5-coder:14b';
@@ -812,9 +817,13 @@ export const orchestrate = async ({project, task, mode, maxAgents, onEvent, run}
     const batchResults = await Promise.all(batch.map(item => runSubAgent({
       name: item.role,
       role: item.role,
-      task: `${item.goal}\n\n(Overall goal: ${cleanTask}). You are READ-ONLY: investigate and report concrete findings; if this is a build task, include the exact code you would write. Do NOT write files.`,
+      task: canEdit
+        ? `${item.goal}\n\n(Overall goal: ${cleanTask}). You have full workspace edit permissions: write and update the files directly with write_file / replace_in_file, and verify your work.`
+        : `${item.goal}\n\n(Overall goal: ${cleanTask}). You are READ-ONLY: investigate and report concrete findings; if this is a build task, include the exact code you would write. Do NOT write files.`,
       project: cleanProject,
       model: workerModel,
+      rounds: canEdit ? 12 : 6,
+      canEdit,
       run
     }).catch(e => ({name: item.role, role: item.role, answer: `error: ${e.message || e}`, tools: []}))));
 

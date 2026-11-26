@@ -710,6 +710,7 @@ function App(){
     contextMessages: 16,
     maxToolLoops: 50,
     reverseTool: 'auto',
+    agentEdits: true,
     ghidraPort: 5093,
     idaPort: 5073
   });
@@ -3356,6 +3357,32 @@ function App(){
                 </div>
                 <div>
                   <button type="button" className="btn" onClick={pickStyleFiles}>{tr('Choose files...')}</button>
+                </div>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3><i className="fa-solid fa-users-gear"></i>{tr('Agents in Workspace')}</h3>
+                  <p>{tr('Allow AI subagents in Workspace to write files and use the same permissions as the main agent.')}</p>
+                </div>
+
+                <div className="settings-grid">
+                  <div className="field field-wide">
+                    <span className="field-label">{tr('Subagent permissions')}</span>
+                    <div className="segmented">
+                      {[{value: true, label: 'Enabled'}, {value: false, label: 'Read-only'}].map(item => (
+                        <button
+                          key={String(item.value)}
+                          type="button"
+                          className={(settings.agentEdits ?? true) === item.value ? 'active' : ''}
+                          onClick={() => changeSetting('agentEdits', item.value)}
+                        >
+                          {tr(item.label)}
+                        </button>
+                      ))}
+                    </div>
+                    <em className="field-help">{tr('When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.')}</em>
+                  </div>
                 </div>
               </section>
 

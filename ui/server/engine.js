@@ -1084,6 +1084,7 @@ router.post('/second/start', async (req, res) => {
   const card = (main.gpus || []).find(item => item.ordinal === mainGpu);
   const cardGb = Math.floor(Number(card?.vram || 0) / gib);
   const shared = gpu >= 0 && gpu === mainGpu;
+  const secondOnly = Boolean(req.body?.secondOnly) && !shared && main.generation === 'ready' && firstPath === (main.model?.path || '');
   // en la misma tarjeta cada modelo tiene al menos 8 GB y entre los dos dejan 1 GB para windows
   const askedFirst = Number(req.body?.first?.gb) || 0;
   const askedSecond = Number(req.body?.second?.gb ?? req.body?.roomGb) || 0;
@@ -1114,7 +1115,7 @@ router.post('/second/start', async (req, res) => {
     firstVram: shared ? firstVram : cardGb - 1,
     secondVram: gpu < 0 ? 0 : shared ? secondVram : Math.floor(Number((main.gpus || []).find(item => item.ordinal === gpu)?.vram || 0) / gib) - 1
   });
-  const restore = {slots: plainSlots(main.slots), pinGb: main.pinGb, vision: main.vision, model: main.model?.path || ''};
+  const restore = secondOnly ? null : {slots: plainSlots(main.slots), pinGb: main.pinGb, vision: main.vision, model: main.model?.path || ''};
   const otherCardVision = main.vision && gpu >= 0 && gpu !== mainGpu && (main.visionGpu < 0 || main.visionGpu === gpu);
 
   second.starting = true;
@@ -1127,7 +1128,7 @@ router.post('/second/start', async (req, res) => {
   const giveBack = async () => {
     await askSecond('POST', '/api/shutdown', null, 5000).catch(() => {});
     await waitFor(async () => !await askSecond('GET', '/api/monitor', null, 800).then(() => true).catch(() => false), 30000, 500);
-    await askEngine('POST', '/api/pool', {slots: restore.slots, pinGb: restore.pinGb, vision: restore.vision}, 20000).catch(() => {});
+    if(restore) await askEngine('POST', '/api/pool', {slots: restore.slots, pinGb: restore.pinGb, vision: restore.vision}, 20000).catch(() => {});
     await writeSecond({model: modelPath, gpu, context, restore: null});
     setLocalTurns(true);
   };
@@ -1135,39 +1136,41 @@ router.post('/second/start', async (req, res) => {
   try {
     await writeSecond({model: modelPath, first: firstPath, gpu, context, plan: second.plan, restore});
 
-    // primero el modelo principal con su parte, despues el segundo con lo que queda
-    second.step = 'Loading the first model with its share';
-    const settings = {slots: mainSlots(main, {...(shared ? {gpu: firstVram} : {}), ram: plan.ramFirst}), pinGb: plan.pinFirst};
+    if(!secondOnly){
+      // primero el modelo principal con su parte, despues el segundo con lo que queda
+      second.step = 'Loading the first model with its share';
+      const settings = {slots: mainSlots(main, {...(shared ? {gpu: firstVram} : {}), ram: plan.ramFirst}), pinGb: plan.pinFirst};
 
-    if(otherCardVision){
-      settings.vision = false;
+      if(otherCardVision){
+        settings.vision = false;
+      }
+
+      // otro modelo primero: se descarga el de ahora antes de cambiar los limites, si no se cargan dos seguidos y chocan
+      // (medido: la recarga del de ahora y la carga del nuevo a la vez fallaron al leer los pesos a la video memoria)
+      const changing = firstPath !== (main.model?.path || '');
+
+      if(changing && main.generation !== 'off'){
+        await askEngine('POST', '/api/models/unload', null, 180000);
+      }
+
+      await askEngine('POST', '/api/pool', settings, 20000);
+
+      if(changing || main.generation !== 'ready'){
+        await askEngine('POST', '/api/models/load', {path: firstPath}, 30000);
+      }
+
+      await waitFor(async () => (await askEngine('GET', '/api/pool', null, 3000)).generation === 'loading', 15000, 300);
+      await waitFor(async () => ['ready', 'failed'].includes((await askEngine('GET', '/api/pool', null, 3000)).generation), 900000, 2000);
+
+      if((await askEngine('GET', '/api/pool', null, 3000)).generation !== 'ready'){
+        throw new Error('The first model could not load with its share, look at master.log');
+      }
+
+      // medido con IQ3_S y IQ1_M: si el segundo carga antes de la primera respuesta del primero, el primero ya no tiene donde
+      // reservar lo suyo y todas sus respuestas fallan sin memoria, asi que primero contesta y despues se mide lo libre
+      second.step = 'The first model gets ready';
+      await warmUp(await engineBase());
     }
-
-    // otro modelo primero: se descarga el de ahora antes de cambiar los limites, si no se cargan dos seguidos y chocan
-    // (medido: la recarga del de ahora y la carga del nuevo a la vez fallaron al leer los pesos a la video memoria)
-    const changing = firstPath !== (main.model?.path || '');
-
-    if(changing && main.generation !== 'off'){
-      await askEngine('POST', '/api/models/unload', null, 180000);
-    }
-
-    await askEngine('POST', '/api/pool', settings, 20000);
-
-    if(changing || main.generation !== 'ready'){
-      await askEngine('POST', '/api/models/load', {path: firstPath}, 30000);
-    }
-
-    await waitFor(async () => (await askEngine('GET', '/api/pool', null, 3000)).generation === 'loading', 15000, 300);
-    await waitFor(async () => ['ready', 'failed'].includes((await askEngine('GET', '/api/pool', null, 3000)).generation), 900000, 2000);
-
-    if((await askEngine('GET', '/api/pool', null, 3000)).generation !== 'ready'){
-      throw new Error('The first model could not load with its share, look at master.log');
-    }
-
-    // medido con IQ3_S y IQ1_M: si el segundo carga antes de la primera respuesta del primero, el primero ya no tiene donde
-    // reservar lo suyo y todas sus respuestas fallan sin memoria, asi que primero contesta y despues se mide lo libre
-    second.step = 'The first model gets ready';
-    await warmUp(await engineBase());
 
     // al segundo le toca lo que el primero de verdad dejo bajo la mitad de la ram: medido, windows le cuenta al primero
     // unos 4.7 GB mas que lo que fija para expertos (35 → 39.7, 29 → 33.7) y al segundo menos de 1 GB mas;

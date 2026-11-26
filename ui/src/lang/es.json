@@ -819,7 +819,8 @@
   "Load its model first": "Primero carga su modelo",
   "The model of {0} is not loaded yet. Load it in Agents, Models.": "El modelo de {0} todavía no está cargado. Cárgalo en Agentes, Modelos.",
   "Load the models of these agents first": "Primero carga los modelos de estos agentes",
-  "Load the models of the team first, in Models": "Primero carga los modelos del equipo, en Modelos",
+  "Load the models of the team first, in Models": "Primero carga los modelos del equipo, en Modelos"
+,
   "Opening the model": "Abriendo el modelo",
   "Building the GPU kernels": "Armando los kernels de la GPU",
   "Reading the weights into video memory": "Leyendo los pesos a la memoria de video",
@@ -963,5 +964,6 @@
   "Subagent permissions": "Permisos de los subagentes",
   "Enabled": "Activado",
   "Read-only": "Solo lectura",
-  "When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.": "Cuando está activado, parallel_agents y orchestrate pueden editar archivos y ejecutar comandos con los mismos permisos de tu workspace."
+  "When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.": "Cuando está activado, parallel_agents y orchestrate pueden editar archivos y ejecutar comandos con los mismos permisos de tu workspace.",
+  "Load second only": "Cargar solo el segundo"
 }

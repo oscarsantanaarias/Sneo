@@ -85,8 +85,8 @@ export function SecondModel({apiUrl, onReady}){
   const fits = !shared || cardGb >= 17;
   const running = Boolean(state?.running) && !moving;
 
-  const start = async () => {
-    if(!first || !secondPick){
+  const start = async (secondOnly = false) => {
+    if((!secondOnly && !first) || !secondPick){
       setNotice(tr('Pick both models first'));
       return;
     }
@@ -98,7 +98,7 @@ export function SecondModel({apiUrl, onReady}){
       const req = await fetch(`${apiUrl}/api/engine/second/start`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({first: {path: first, gb: shared ? firstGb : 0}, second: {path: secondPick, gpu, gb: shared ? secondGb : 0, context}})
+        body: JSON.stringify({first: {path: first, gb: shared ? firstGb : 0}, second: {path: secondPick, gpu, gb: shared ? secondGb : 0, context}, secondOnly})
       });
       const res = await req.json().catch(() => ({}));
 
@@ -225,7 +225,10 @@ export function SecondModel({apiUrl, onReady}){
         <span className="rail-spacer"></span>
         {running || moving
           ? <button type="button" className="agents-small agents-danger" disabled={busy} onClick={stop}><i className="fa-solid fa-eject"></i> {tr('Unload the second model')}</button>
-          : <button type="button" className="agents-run" disabled={busy || !first || !secondPick || !fits} onClick={start}><i className="fa-solid fa-layer-group"></i> {tr('Load both models')}</button>}
+          : <>
+              {!shared && first && <button type="button" className="agents-small" disabled={busy || !secondPick || !fits} onClick={() => start(true)}><i className="fa-solid fa-play"></i> {tr('Load second only')}</button>}
+              <button type="button" className="agents-run" disabled={busy || !first || !secondPick || !fits} onClick={() => start(false)}><i className="fa-solid fa-layer-group"></i> {tr('Load both models')}</button>
+            </>}
       </div>
     </section>
   );

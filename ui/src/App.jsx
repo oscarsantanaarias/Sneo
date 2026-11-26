@@ -666,6 +666,8 @@ function FileItem({item, level = 0, onOpen, openFile, onContext}) {
 function App(){
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState('');
+  const activeChatIdRef = useRef(activeChatId);
+  activeChatIdRef.current = activeChatId;
   const [messages, setMessages] = useState([]);
   const [projects, setProjects] = useState([]);
   const [project, setProject] = useState('');
@@ -1579,7 +1581,8 @@ function App(){
 
         return {...chat, thinkDepth: old.thinkDepth, thinkCap: old.thinkCap};
       }));
-      selectChat(res.chats[0]);
+      const keep = activeChatIdRef.current && res.chats.some(c => c.id === activeChatIdRef.current);
+      if(!keep) selectChat(res.chats[0]);
 
     } catch(e) {
       await uiAlert(e.message);

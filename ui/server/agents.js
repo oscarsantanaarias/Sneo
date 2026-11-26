@@ -618,10 +618,12 @@ Deliver clear findings, risks and the next step.
   };
 
   for(let i = 0; i < rounds; i++){
+    if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
     shrinkResults(messages);
     const reply = route
       ? await askRoute(route, messages, toolList, subRun)
       : await askModelChat(messages, toolList, subRun, model);
+    if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
     const rawAnswer = reply.content || '';
     const answer = rawAnswer
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -639,6 +641,7 @@ Deliver clear findings, risks and the next step.
       messages.push({role: 'assistant', content: answer, tool_calls: calls.map(call => call.args ? call.item : {...call.item, function: {...call.item.function, arguments: '{}'}}), ...(reply.raw ? {_claude: reply.raw} : {})});
 
       for(const call of calls){
+        if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
         const asked = call.item.function?.name || '';
         onStep?.({tool: asked, detail: stepDetail(call.args)});
         const resolved = resolveCall(asked, call.args || {}, '');
@@ -696,6 +699,7 @@ Deliver clear findings, risks and the next step.
     const results = [];
 
     for(const call of calls){
+      if(run?.signal?.aborted) return {name, role, answer: 'Stopped by user.', tools, stopped: true};
       const callArgs = {...(call.args || {})};
 
       await placeCall(call.tool, callArgs, project);
@@ -811,6 +815,7 @@ export const orchestrate = async ({project, task, mode, maxAgents, onEvent, run}
   const results = [];
 
   for(let i = 0; i < plan.length; i += wave){
+    if(run?.signal?.aborted) break;
     const batch = plan.slice(i, i + wave);
     onEvent?.({type: 'tool', tool: `orchestrator: wave ${Math.floor(i / wave) + 1}/${Math.ceil(plan.length / wave)} (${batch.map(item => item.role).join(', ')})`});
 
@@ -840,6 +845,10 @@ export const orchestrate = async ({project, task, mode, maxAgents, onEvent, run}
     } catch(e) {
       judge = {error: String(e.message || e)};
     }
+  }
+
+  if(run?.signal?.aborted){
+    return {mode: kind, plan, agents: results.map(item => ({role: item.role, answer: item.answer})), judge, answer: 'Stopped by user.'};
   }
 
   onEvent?.({type: 'tool', tool: `orchestrator: synthesizing with ${bigModel}`});

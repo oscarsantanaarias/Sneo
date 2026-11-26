@@ -2631,7 +2631,7 @@ function App(){
                       {(sub.step || sub.thought) && (
                         <div className="subagent-activity">
                           {sub.step && <div className="subagent-step">{sub.step}</div>}
-                          {sub.thought && isRunning && <div className="subagent-thought">{sub.thought.slice(-240)}</div>}
+                          {sub.thought && isRunning && <div className="subagent-thought">{sub.thought.slice(-1500)}</div>}
                         </div>
                       )}
                       {isRunning && (

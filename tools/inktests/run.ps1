@@ -1,4 +1,4 @@
-param([string]$Tag = "ink", [int]$Context = 16384, [string]$Ask = "ask1.mjs", [switch]$Keep, [string]$Model = "F:\AI Projects\Strata\Models\Inkling-2-Mini\Inkling-2-Mini-UD-Q4_K_XL.gguf", [string]$Dump = "", [switch]$Vision, [switch]$Profile)
+param([string]$Tag = "ink", [int]$Context = 16384, [string]$Ask = "ask1.mjs", [switch]$Keep, [string]$Model = "F:\AI Projects\Strata\Models\Inkling-2-Mini\Inkling-2-Mini-UD-Q4_K_XL.gguf", [string]$Dump = "", [switch]$Vision, [switch]$Profile, [switch]$Speculate, [switch]$FastRouting)
 $here = $PSScriptRoot
 $tree = (Resolve-Path "$here\..\..").Path
 $exe = "$tree\build\master_ink.exe"
@@ -9,7 +9,7 @@ if ($busy) { "not testing, running: $(($busy | ForEach-Object { $_.Path }) -join
 if (-not (Test-Path "$here\build\master.exe")) { "build first with build.bat"; exit 1 }
 New-Item -ItemType Directory -Force "$here\logs" | Out-Null
 Copy-Item "$here\build\master.exe" $exe -Force
-$pool = [ordered]@{acceptRequests = $false; vision = [bool]$Vision; secondGpu = $false; helperGpu = -1; context = $Context; speculate = $false; fastRouting = $false; holdRam = $true}
+$pool = [ordered]@{acceptRequests = $false; vision = [bool]$Vision; secondGpu = $false; helperGpu = -1; context = $Context; speculate = [bool]$Speculate; fastRouting = [bool]$FastRouting; holdRam = $true}
 ($pool | ConvertTo-Json -Compress) | Set-Content -Encoding ascii "$here\logs\pool.json"
 $env:CUDA_VISIBLE_DEVICES = "GPU-486c00fa-7213-019b-2a6e-6f2dd91f1f4d"
 if ($Dump) { $env:SNEO_INK_DUMP = $Dump }

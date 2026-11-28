@@ -647,6 +647,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
     int d = s.hidden;
     unsigned int spread = (unsigned int)n;
     unsigned int resThreads = n <= s.fewRows ? 1024 : 256;
+    unsigned int normThreads = (d & 3) == 0 && d <= 4096 ? (unsigned int)((d / 4 + 31) / 32 * 32) : resThreads;
     auto blocks = [](uint64_t c){ return (unsigned int)((c + 255) / 256); };
     PackedInput& pk = packs[0], & pk1 = packs[1];
     uint64_t none = 0;
@@ -669,11 +670,11 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
     };
     auto gate = [&](uint64_t from, int k, uint64_t into){
         go("inkMsgDown", spread, (unsigned int)((s.rank + 15) / 16), 256, 1, from, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ + k, L.ctrlDown[k], b.gates, d, s.rank, s.eps);
-        go("inkMsgMix", (unsigned int)((d + 7) / 8), spread, 256, 1, from, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ + k, b.gates, L.ctrlForget[k], L.ctrlGain[k], into, d, s.rank);
+        go("inkMsgMix", (unsigned int)((d + 31) / 32), spread, 256, 1, from, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ + k, b.gates, L.ctrlForget[k], L.ctrlGain[k], into, d, s.rank);
     };
     auto gate3 = [&](uint64_t f0, uint64_t o0, uint64_t f1, uint64_t o1, uint64_t f2, uint64_t o2){
         go("inkMsgDown3", spread, (unsigned int)(3 * ((s.rank + 15) / 16)), 256, 1, f0, L.ctrlDown[0], f1, L.ctrlDown[1], f2, L.ctrlDown[2], b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ, b.gates, d, s.rank, s.eps);
-        go("inkMsgMix3", (unsigned int)((d + 7) / 8), spread * 3, 256, 1, f0, L.ctrlForget[0], L.ctrlGain[0], o0, f1, L.ctrlForget[1], L.ctrlGain[1], o1, f2, L.ctrlForget[2], L.ctrlGain[2], o2, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ, b.gates, d, s.rank);
+        go("inkMsgMix3", (unsigned int)((d + 31) / 32), spread * 3, 256, 1, f0, L.ctrlForget[0], L.ctrlGain[0], o0, f1, L.ctrlForget[1], L.ctrlGain[1], o1, f2, L.ctrlForget[2], L.ctrlGain[2], o2, b.prevBlock, b.prevH, b.msgWeights, totalQ, layerQ, b.gates, d, s.rank);
     };
     uint64_t packedFrom = 0;
     uint64_t hq = b.hq, hk = b.hq, hv = b.hq;
@@ -685,7 +686,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
             go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, h, b.hv, n * d);
         }
         if(messages) gate3(b.hq, b.hq, b.hk, b.hk, b.hv, b.hv);
-        go("inkNorm3", spread * 3, 1, 256, 1, b.hq, L.qNorm, b.hq, b.hk, L.kNorm, b.hk, b.hv, L.vNorm, b.hv, pk.values, pk.scales, pk.sums, pk1.values, pk1.scales, pk1.sums, b.inValues, b.inScales, b.inSums, d, s.eps);
+        go("inkNorm3", spread * 3, 1, normThreads, 1, b.hq, L.qNorm, b.hq, b.hk, L.kNorm, b.hk, b.hv, L.vNorm, b.hv, pk.values, pk.scales, pk.sums, pk1.values, pk1.scales, pk1.sums, b.inValues, b.inScales, b.inSums, d, s.eps);
         packedFrom = b.hq;
         hk = b.hk;
         hv = b.hv;
@@ -694,15 +695,15 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
             if(l > 0) blockRes(h, count, L.resQuery, 1, b.xin, none, none, none);
             else go("inkCopy", blocks((uint64_t)n * d), 1, 256, 1, h, b.xin, n * d);
             gate3(b.xin, b.hq, b.xin, b.hk, b.xin, b.hv);
-            go("inkNorm3", spread * 3, 1, 256, 1, b.hq, L.norm, b.hq, b.hk, L.norm, b.hk, b.hv, L.norm, b.hv, pk.values, pk.scales, pk.sums, pk1.values, pk1.scales, pk1.sums, b.inValues, b.inScales, b.inSums, d, s.eps);
+            go("inkNorm3", spread * 3, 1, normThreads, 1, b.hq, L.norm, b.hq, b.hk, L.norm, b.hk, b.hv, L.norm, b.hv, pk.values, pk.scales, pk.sums, pk1.values, pk1.scales, pk1.sums, b.inValues, b.inScales, b.inSums, d, s.eps);
             packedFrom = b.hq;
             hk = b.hk;
             hv = b.hv;
         } else if(l > 0){
-            go("inkBlockResNorm", spread, 1, resThreads, 1, st[0], st[1], st[2], st[3], h, count, L.resQuery, L.norm, b.hq, pk.values, pk.scales, pk.sums, d, s.eps);
+            go("inkBlockResNorm", spread, 1, normThreads, 1, st[0], st[1], st[2], st[3], h, count, L.resQuery, L.norm, b.hq, pk.values, pk.scales, pk.sums, d, s.eps);
             packedFrom = b.hq;
         } else {
-            go("inkNormPack", spread, 1, 256, 1, h, L.norm, b.hq, pk.values, pk.scales, pk.sums, d, s.eps);
+            go("inkNormPack", spread, 1, normThreads, 1, h, L.norm, b.hq, pk.values, pk.scales, pk.sums, d, s.eps);
             packedFrom = b.hq;
         }
     }
@@ -719,7 +720,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
     if(n <= s.fewRows && L.qA.values && L.kA.values && L.vA.values && L.gateA.values && L.relA.values){
         auto runQ8 = [&](const InkQ8& m0, uint64_t o0, const InkQ8& m1, uint64_t o1, const InkQ8& m2, uint64_t o2, const InkQ8& m3, uint64_t o3, const InkQ8& m4, uint64_t o4, const InkQ8& m5, uint64_t o5, uint64_t pkV, uint64_t pkS){
             int total = m0.rows + m1.rows + m2.rows + m3.rows + m4.rows + m5.rows;
-            int perBlock = total <= 4096 ? 4 : 8;
+            int perBlock = 16;
             go("inkRowsQ8", (unsigned int)((total + perBlock - 1) / perBlock), spread, (unsigned int)(perBlock * 8), 1, m0.values, m0.scales, m0.rows, o0, m1.values, m1.scales, m1.rows, o1, m2.values, m2.scales, m2.rows, o2, m3.values, m3.scales, m3.rows, o3, m4.values, m4.scales, m4.rows, o4, m5.values, m5.scales, m5.rows, o5, pkV, pkS, m0.cols, n);
         };
         InkQ8 z;
@@ -757,10 +758,10 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         if(L.full) fromPacked(L.vProj, hv, b.dynV);
     }
     check("the projections");
-    go("inkClip2", spread * 24 * 2, 1, 128, 1, b.q, L.qClip, 128, s.qkClip, b.rel, L.relClip, 16, s.relClip, b.positions, 24, L.full ? 1 : 0, s.logAlpha, s.logFloor);
     if(n == 1){
-        go("inkConvStore", 8, 1, 128, 1, b.k, L.kConv, L.full ? b.dynK : none, R.kHist, b.v, L.vConv, L.full ? b.dynV : none, R.vHist, R.kCache, R.vCache, b.positions, R.ring, 8, s.qkClip, s.eps);
+        go("inkClipConvStore", 56, 1, 128, 1, b.q, L.qClip, s.qkClip, b.rel, L.relClip, s.relClip, b.positions, 24, L.full ? 1 : 0, s.logAlpha, s.logFloor, b.k, L.kConv, L.full ? b.dynK : none, R.kHist, b.v, L.vConv, L.full ? b.dynV : none, R.vHist, R.kCache, R.vCache, R.ring, 8, s.eps);
     } else {
+        go("inkClip2", spread * 24 * 2, 1, 128, 1, b.q, L.qClip, 128, s.qkClip, b.rel, L.relClip, 16, s.relClip, b.positions, 24, L.full ? 1 : 0, s.logAlpha, s.logFloor);
         go("inkConv2", blocks(2048), 1, 256, 1, b.k, L.kConv, L.full ? b.dynK : none, R.kHist, b.v, L.vConv, L.full ? b.dynV : none, R.vHist, n, 1024, 128);
         go("inkStore", spread * 8, 1, 128, 1, b.k, b.v, R.kCache, R.vCache, b.positions, R.ring, 8, s.qkClip, s.eps);
     }
@@ -780,26 +781,26 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
     }
     check("the attention");
     if(!fuseGate) go("hyGateMulPack", (unsigned int)(((uint64_t)n * 3072 / 32 + 7) / 8), 1, 32, 8, b.attn, b.gateRaw, n * 3072, pk.values, pk.scales, pk.sums);
-    if(n <= s.fewRows && L.outA.values) go("inkRowsQ8", (unsigned int)((L.outA.rows + 3) / 4), spread, 32, 1, L.outA.values, L.outA.scales, L.outA.rows, b.proj, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, pk.values, pk.scales, L.outA.cols, n);
+    if(n <= s.fewRows && L.outA.values) go("inkRowsQ8", (unsigned int)((L.outA.rows + 15) / 16), spread, 128, 1, L.outA.values, L.outA.scales, L.outA.rows, b.proj, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, pk.values, pk.scales, L.outA.cols, n);
     else project(L.out, b.attn, 0, b.proj, n);
     check("the output projection");
     int inner = count;
     if(boundary >= 0){
-        go("inkConvAdd", (unsigned int)((d + 63) / 64), 1, 64, 1, b.proj, L.postConv, R.postHist, none, b.resid, n, d);
+        go("inkConvAdd", (unsigned int)((d + 127) / 128), 1, 128, 1, b.proj, L.postConv, R.postHist, none, b.resid, n, d);
         inner = count + 1;
-    } else go("inkConvAdd", (unsigned int)((d + 63) / 64), 1, 64, 1, b.proj, L.postConv, R.postHist, h, b.resid, n, d);
+    } else go("inkConvAdd", (unsigned int)((d + 127) / 128), 1, 128, 1, b.proj, L.postConv, R.postHist, h, b.resid, n, d);
     bool xnPacked = false;
     if(messages){
         blockRes(b.resid, inner, L.ffnQuery, 1, b.mlpIn, none, none, none);
         gate(b.mlpIn, 3, b.xin);
-        go("inkNormPack", spread, 1, 256, 1, b.xin, L.ffnNorm, b.xn, pk.values, pk.scales, pk.sums, d, s.eps);
+        go("inkNormPack", spread, 1, normThreads, 1, b.xin, L.ffnNorm, b.xn, pk.values, pk.scales, pk.sums, d, s.eps);
         xnPacked = n <= s.fewRows && (L.gateUp.type == 40 || L.gateUp.type == 8) && (L.down.type == 40 || L.down.type == 8);
     } else {
-        go("inkBlockResNorm", spread, 1, resThreads, 1, st[0], st[1], st[2], st[3], b.resid, inner, L.ffnQuery, L.ffnNorm, b.xn, pk.values, pk.scales, pk.sums, d, s.eps);
+        go("inkBlockResNorm", spread, 1, normThreads, 1, st[0], st[1], st[2], st[3], b.resid, inner, L.ffnQuery, L.ffnNorm, b.xn, pk.values, pk.scales, pk.sums, d, s.eps);
         xnPacked = n <= s.fewRows && (L.gateUp.type == 40 || L.gateUp.type == 8) && (L.down.type == 40 || L.down.type == 8);
     }
     check("the mlp input");
-    go("inkWide16", (unsigned int)s.experts, spread, 32, 1, L.router, b.xn, d, b.logits, s.experts, d);
+    go("inkWide16", (unsigned int)s.experts, spread, 256, 1, L.router, b.xn, d, b.logits, s.experts, d);
     go("inkRouteFast", spread, 1, 32, 1, b.logits, L.routerBias, b.ids, b.weights, s.experts, s.used, s.routeScale);
     check("the router");
     if(xnPacked){
@@ -809,7 +810,7 @@ inline void GpuModel::inkLayerRun(int l, int r, uint64_t h, uint64_t next, int c
         go(downName, (unsigned int)((d + 7) / 8), (unsigned int)n, 256, 1, L.down.data, L.down.stride, L.downBytes, b.ids, b.weights, L.dScale, b.hidValues, b.hidScales, b.hidSums, b.moe, d, s.expertWidth, s.used, tables);
     } else inkExperts(L, n);
     check("the experts");
-    go("inkConvAdd", (unsigned int)((d + 63) / 64), 1, 64, 1, b.moe, L.ffnConv, R.ffnHist, b.resid, next, n, d);
+    go("inkConvAdd", (unsigned int)((d + 127) / 128), 1, 128, 1, b.moe, L.ffnConv, R.ffnHist, b.resid, next, n, d);
 }
 
 inline bool GpuModel::inkChunk(const int* ids, const int* positions, int n, bool last) {
@@ -870,9 +871,10 @@ inline bool GpuModel::inkChunk(const int* ids, const int* positions, int n, bool
         uint64_t lastRow = b.h[at] + 4ULL * (n - 1) * d;
         uint64_t st[4];
         for(int k = 0; k < 4; k++) st[k] = b.blocks[k] + 4ULL * (n - 1) * d;
-        go("inkBlockResNorm", 1, 1, 1024, 1, st[0], st[1], st[2], st[3], lastRow, count, b.outQuery, b.outNorm, b.last, packs[0].values, packs[0].scales, packs[0].sums, d, s.eps);
+        unsigned int lastNormThreads = (d & 3) == 0 && d <= 4096 ? (unsigned int)((d / 4 + 31) / 32 * 32) : 1024u;
+        go("inkBlockResNorm", 1, 1, lastNormThreads, 1, st[0], st[1], st[2], st[3], lastRow, count, b.outQuery, b.outNorm, b.last, packs[0].values, packs[0].scales, packs[0].sums, d, s.eps);
         if(b.headA.values){
-            go("inkRowsQ8", (unsigned int)((b.headA.rows + 7) / 8), 1, 64, 1, b.headA.values, b.headA.scales, b.headA.rows, b.vocab, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, packs[0].values, packs[0].scales, b.headA.cols, 1);
+            go("inkRowsQ8", (unsigned int)((b.headA.rows + 15) / 16), 1, 128, 1, b.headA.values, b.headA.scales, b.headA.rows, b.vocab, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, none, none, 0, none, packs[0].values, packs[0].scales, b.headA.cols, 1);
         } else inkProject(head, b.last, b.vocab, 1);
         go("inkHead", blocks(s.vocab), 1, 256, 1, b.vocab, s.vocab, s.unpadded, s.softcap);
         int keep = shortlist > 0 ? shortlist : 0;

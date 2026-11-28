@@ -23,7 +23,7 @@ inline uint64_t rowBytes(uint32_t type, uint64_t elements) {
 
 inline bool knownType(uint32_t type) {
     switch(type){
-        case 0: case 1: case 12: case 13: case 14: case 16: case 17: case 18:
+        case 0: case 1: case 11: case 12: case 13: case 14: case 16: case 17: case 18:
         case 7: case 8: case 20: case 21: case 22: case 23: case 29: case 30: case 39: case 40: case 42:
             return true;
     }
@@ -136,6 +136,31 @@ inline void dequantRow(uint32_t type, const uint8_t* src, float* out, int64_t co
         float* y = out + b * per;
 
         switch(type){
+            case 11: {
+                float d = half(q + 108);
+                uint32_t aux[4];
+                memcpy(aux, q + 96, 12);
+                uint32_t tmp = aux[2];
+                aux[2] = ((aux[0] >> 4) & 0x0f0f0f0fu) | (((tmp >> 4) & 0x03030303u) << 4);
+                aux[3] = ((aux[1] >> 4) & 0x0f0f0f0fu) | (((tmp >> 6) & 0x03030303u) << 4);
+                aux[0] = (aux[0] & 0x0f0f0f0fu) | (((tmp >> 0) & 0x03030303u) << 4);
+                aux[1] = (aux[1] & 0x0f0f0f0fu) | (((tmp >> 2) & 0x03030303u) << 4);
+                const uint8_t* sc = (const uint8_t*)aux;
+                for(int n = 0; n < 2; n++){
+                    const uint8_t* qp = q + 32 + 32 * n;
+                    for(int l = 0; l < 4; l++){
+                        int shift = 2 * l;
+                        uint8_t m = (uint8_t)(1u << (4 * n + l));
+                        float dl0 = d * (float)((int)sc[8 * n + 2 * l] - 32);
+                        float dl1 = d * (float)((int)sc[8 * n + 2 * l + 1] - 32);
+                        for(int k = 0; k < 16; k++){
+                            y[128 * n + 32 * l + k] = dl0 * (float)(((qp[k] >> shift) & 3) - ((q[k] & m) ? 0 : 4));
+                            y[128 * n + 32 * l + 16 + k] = dl1 * (float)(((qp[16 + k] >> shift) & 3) - ((q[16 + k] & m) ? 0 : 4));
+                        }
+                    }
+                }
+                break;
+            }
             case 12:
             case 13: {
                 float d = half(q), dmin = half(q + 2);

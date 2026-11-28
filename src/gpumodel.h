@@ -3065,7 +3065,7 @@ struct GpuModel {
         uint64_t none = 0;
         PackedInput& a = packs[slot];
         PackedInput b = fine && residual ? fines[slot] : PackedInput();
-        bool known = m.type == 12 || m.type == 13 || m.type == 14 || m.type == 20 || m.type == 21 || m.type == 23 || m.type == 42 || m.type == 7 || m.type == 8;
+        bool known = m.type == 11 || m.type == 12 || m.type == 13 || m.type == 14 || m.type == 20 || m.type == 21 || m.type == 23 || m.type == 42 || m.type == 7 || m.type == 8;
         // de 2 a 16 tokens con los nucleos tensoriales: cada pedazo de tokens se lee una vez para 16 filas de pesos
         // Q8_0 no entra: en matrices de 6 MB va a 333-367 GB/s contra 461-599 de dos filas por warp
         if(fewMma && known && m.type != 8 && n >= fewMmaFrom && n <= 16 && fine && !exact && !legacy && !amdCards && m.cols % 32 == 0){

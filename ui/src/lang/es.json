@@ -962,6 +962,8 @@
   "Agents in Workspace": "Agentes en Workspace",
   "Allow AI subagents in Workspace to write files and use the same permissions as the main agent.": "Permite que los subagentes de la IA en Workspace escriban archivos y usen los mismos permisos que el agente principal.",
   "Subagent permissions": "Permisos de los subagentes",
+  "Global memory": "Memoria global",
+  "When enabled, saved memories from previous chats are injected into new conversations.": "Cuando está activado, las memorias guardadas de chats anteriores se inyectan en las conversaciones nuevas.",
   "Enabled": "Activado",
   "Read-only": "Solo lectura",
   "When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.": "Cuando está activado, parallel_agents y orchestrate pueden editar archivos y ejecutar comandos con los mismos permisos de tu workspace.",

@@ -717,6 +717,7 @@ function App(){
     maxToolLoops: 50,
     reverseTool: 'auto',
     agentEdits: true,
+    globalMemory: false,
     ghidraPort: 5093,
     idaPort: 5073
   });
@@ -3474,6 +3475,23 @@ function App(){
                       ))}
                     </div>
                     <em className="field-help">{tr('When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.')}</em>
+                  </div>
+
+                  <div className="field field-wide">
+                    <span className="field-label">{tr('Global memory')}</span>
+                    <div className="segmented">
+                      {[{value: false, label: 'Disabled'}, {value: true, label: 'Enabled'}].map(item => (
+                        <button
+                          key={String(item.value)}
+                          type="button"
+                          className={(settings.globalMemory ?? false) === item.value ? 'active' : ''}
+                          onClick={() => changeSetting('globalMemory', item.value)}
+                        >
+                          {tr(item.label)}
+                        </button>
+                      ))}
+                    </div>
+                    <em className="field-help">{tr('When enabled, saved memories from previous chats are injected into new conversations.')}</em>
                   </div>
                 </div>
               </section>

@@ -1157,7 +1157,7 @@ export const getAgentAnswer = async (options = {}) => {
 
   const skills = await loadSkills();
   const skillsBlock = buildSkillsBlock(skills);
-  const memoryBlock = await buildMemoryBlock();
+  const memoryBlock = settings.globalMemory === true ? await buildMemoryBlock() : '';
   const reverseAsked = [message, ...history.filter(item => item?.role === 'user').slice(-3).map(item => typeof item.content === 'string' ? item.content : '')].join('\n');
   const reverseTalk = /\b(ghidra|ida|ida_bridge|decompil\w*|disassembl\w*|desensambl\w*|xrefs?|reversing|reverse engineering|re_search|re_map|re_index)\b/i.test(reverseAsked)
     || (addressRe.test(String(message || '')) && reverseAskRe.test(String(message || '')));

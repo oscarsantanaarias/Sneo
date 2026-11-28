@@ -242,7 +242,7 @@ router.post('/style/remove', async (req, res) => {
 });
 
 router.put('/settings', async (req, res) => {
-  const {model, accessMode, allowNetwork, language, contextMessages, maxToolLoops, reverseTool, agentEdits, ghidraPort, idaPort, providerBaseUrl, providerApiKey, numCtx, temperature, thinkDepth, thinkCap, imageBaseUrl, imageModel, imageApiKey} = req.body ?? {};
+  const {model, accessMode, allowNetwork, language, contextMessages, maxToolLoops, reverseTool, agentEdits, globalMemory, ghidraPort, idaPort, providerBaseUrl, providerApiKey, numCtx, temperature, thinkDepth, thinkCap, imageBaseUrl, imageModel, imageApiKey} = req.body ?? {};
 
   if(accessMode !== undefined && ![...accessModes, 'ask', 'full'].includes(accessMode)){
     return res.status(400).json({message: 'accessMode must be manual, plan or auto.'});
@@ -276,6 +276,7 @@ router.put('/settings', async (req, res) => {
       maxToolLoops: Math.min(50, Math.max(1, Number(maxToolLoops || current.maxToolLoops))),
       reverseTool: ['auto', 'ghidra', 'ida'].includes(reverseTool) ? reverseTool : current.reverseTool,
       agentEdits: typeof agentEdits === 'boolean' ? agentEdits : current.agentEdits !== false,
+      globalMemory: typeof globalMemory === 'boolean' ? globalMemory : current.globalMemory === true,
       ghidraPort: nextGhidraPort,
       idaPort: nextIdaPort,
       providerBaseUrl: cleanText(providerBaseUrl === undefined ? current.providerBaseUrl : providerBaseUrl) || 'http://localhost:8000/v1',

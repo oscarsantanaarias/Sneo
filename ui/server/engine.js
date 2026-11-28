@@ -12,7 +12,6 @@ import { forgetEngine } from './model.js';
 import { readRoutes, routePresets, saveRoutes, setLocalTurns } from './teams.js';
 import { downloadState, modelCatalog, startDownload, stopDownload } from './models.js';
 import { pickFolder } from './picker.js';
-import { onWindows, programPath, stopProgram } from './system.js';
 
 const router = express.Router();
 const execFileAsync = promisify(execFile);
@@ -202,11 +201,6 @@ router.post('/pool/:action', async (req, res) => {
 });
 
 router.get('/firewall', async (req, res) => {
-  // en linux el firewall depende de cada distro y casi siempre viene abierto en la red de la casa
-  if(!onWindows){
-    return res.status(200).json({ready: true, ruleOk: true, publicNetwork: ''});
-  }
-
   const ruleOk = await execFileAsync('netsh', ['advfirewall', 'firewall', 'show', 'rule', 'name=Sneo pool door'], {windowsHide: true}).then(() => true).catch(() => false);
   const publicNetwork = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', "Get-NetConnectionProfile | Where-Object { $_.NetworkCategory -eq 'Public' } | Select-Object -First 1 -ExpandProperty Name"], {windowsHide: true})
     .then(result => String(result.stdout || '').trim())
@@ -227,10 +221,6 @@ router.get('/firewall', async (req, res) => {
 });
 
 router.post('/firewall', (req, res) => {
-  if(!onWindows){
-    return res.status(200).json({started: false, message: 'Open tcp ports 9090 and 9097 in this PC firewall if it has one'});
-  }
-
   const script = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'tools', 'pool_setup.ps1');
   spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script], {detached: true, stdio: 'ignore'}).unref();
   return res.status(200).json({started: true});
@@ -390,7 +380,7 @@ router.post('/worker/join', async (req, res) => {
 
   if(!state.running){
     const log = fs.openSync(path.join(rootDir, 'worker.log'), 'a');
-    spawn(programPath(rootDir, 'worker'), ['9090', 'cache', '--no-browser'], {cwd: rootDir, detached: true, stdio: ['ignore', log, log], windowsHide: true}).unref();
+    spawn(path.join(rootDir, 'worker.exe'), ['9090', 'cache', '--no-browser'], {cwd: rootDir, detached: true, stdio: ['ignore', log, log], windowsHide: true}).unref();
     fs.closeSync(log);
     for(let i = 0; i < 40 && !state.running; i++){
       await new Promise(done => setTimeout(done, 500));
@@ -399,7 +389,7 @@ router.post('/worker/join', async (req, res) => {
   }
 
   if(!state.running){
-    return res.status(500).json({message: `the worker did not start; run ${onWindows ? 'build.bat' : 'build.sh'} to build it`});
+    return res.status(500).json({message: 'worker.exe did not start; run build.bat to build it'});
   }
 
   if(state.status === 'joined' && state.host === host){
@@ -422,7 +412,8 @@ router.post('/worker/join', async (req, res) => {
 
 router.post('/worker/leave', async (req, res) => {
   await fetch(`${workerPage}/leave`, {method: 'POST', signal: AbortSignal.timeout(15000)}).catch(() => {});
-  await stopProgram(programPath(rootDir, 'worker'));
+  const exe = path.join(rootDir, 'worker.exe').replace(/'/g, "''");
+  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Get-Process worker -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '${exe}' } | Stop-Process -Force`], {windowsHide: true}).catch(() => {});
   return res.status(200).json({running: false});
 });
 
@@ -574,11 +565,6 @@ const heatShape = buffer => {
 };
 
 const pickFile = async (script) => {
-  // en linux la ventana de abrir es la de zenity y elige un archivo cualquiera
-  if(!onWindows){
-    const result = await execFileAsync('zenity', ['--file-selection', '--title=Sneo'], {timeout: 300000, maxBuffer: 1024 * 100}).catch(() => ({stdout: ''}));
-    return String(result.stdout || '').trim();
-  }
   const result = await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-Command', `Add-Type -AssemblyName System.Windows.Forms; $owner = New-Object System.Windows.Forms.Form -Property @{TopMost = $true}; ${script}; if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.FileName }`], {
     timeout: 300000,
     windowsHide: false,
@@ -1093,11 +1079,12 @@ router.post('/second/start', async (req, res) => {
   const modelPath = String(req.body?.second?.path || req.body?.path || '');
   const gpu = Number.isInteger(Number(req.body?.second?.gpu ?? req.body?.gpu)) ? Number(req.body?.second?.gpu ?? req.body?.gpu) : 0;
   const context = Math.min(262144, Math.max(4096, parseInt(req.body?.second?.context ?? req.body?.context, 10) || 32768));
-  const masterExe = programPath(rootDir, 'master');
+  const masterExe = path.join(rootDir, 'master.exe');
   const mainGpu = main.mainGpu >= 0 ? main.mainGpu : 0;
   const card = (main.gpus || []).find(item => item.ordinal === mainGpu);
   const cardGb = Math.floor(Number(card?.vram || 0) / gib);
   const shared = gpu >= 0 && gpu === mainGpu;
+  const secondOnly = Boolean(req.body?.secondOnly) && !shared && main.generation === 'ready' && firstPath === (main.model?.path || '');
   // en la misma tarjeta cada modelo tiene al menos 8 GB y entre los dos dejan 1 GB para windows
   const askedFirst = Number(req.body?.first?.gb) || 0;
   const askedSecond = Number(req.body?.second?.gb ?? req.body?.roomGb) || 0;
@@ -1111,7 +1098,7 @@ router.post('/second/start', async (req, res) => {
   }
 
   if(!fs.existsSync(masterExe)){
-    return res.status(404).json({message: 'The engine was not found, build it first.'});
+    return res.status(404).json({message: 'master.exe not found, build the engine first.'});
   }
 
   if(shared && cardGb < 17){
@@ -1128,7 +1115,7 @@ router.post('/second/start', async (req, res) => {
     firstVram: shared ? firstVram : cardGb - 1,
     secondVram: gpu < 0 ? 0 : shared ? secondVram : Math.floor(Number((main.gpus || []).find(item => item.ordinal === gpu)?.vram || 0) / gib) - 1
   });
-  const restore = {slots: plainSlots(main.slots), pinGb: main.pinGb, vision: main.vision, model: main.model?.path || ''};
+  const restore = secondOnly ? null : {slots: plainSlots(main.slots), pinGb: main.pinGb, vision: main.vision, model: main.model?.path || ''};
   const otherCardVision = main.vision && gpu >= 0 && gpu !== mainGpu && (main.visionGpu < 0 || main.visionGpu === gpu);
 
   second.starting = true;
@@ -1141,7 +1128,7 @@ router.post('/second/start', async (req, res) => {
   const giveBack = async () => {
     await askSecond('POST', '/api/shutdown', null, 5000).catch(() => {});
     await waitFor(async () => !await askSecond('GET', '/api/monitor', null, 800).then(() => true).catch(() => false), 30000, 500);
-    await askEngine('POST', '/api/pool', {slots: restore.slots, pinGb: restore.pinGb, vision: restore.vision}, 20000).catch(() => {});
+    if(restore) await askEngine('POST', '/api/pool', {slots: restore.slots, pinGb: restore.pinGb, vision: restore.vision}, 20000).catch(() => {});
     await writeSecond({model: modelPath, gpu, context, restore: null});
     setLocalTurns(true);
   };
@@ -1149,39 +1136,41 @@ router.post('/second/start', async (req, res) => {
   try {
     await writeSecond({model: modelPath, first: firstPath, gpu, context, plan: second.plan, restore});
 
-    // primero el modelo principal con su parte, despues el segundo con lo que queda
-    second.step = 'Loading the first model with its share';
-    const settings = {slots: mainSlots(main, {...(shared ? {gpu: firstVram} : {}), ram: plan.ramFirst}), pinGb: plan.pinFirst};
+    if(!secondOnly){
+      // primero el modelo principal con su parte, despues el segundo con lo que queda
+      second.step = 'Loading the first model with its share';
+      const settings = {slots: mainSlots(main, {...(shared ? {gpu: firstVram} : {}), ram: plan.ramFirst}), pinGb: plan.pinFirst};
 
-    if(otherCardVision){
-      settings.vision = false;
+      if(otherCardVision){
+        settings.vision = false;
+      }
+
+      // otro modelo primero: se descarga el de ahora antes de cambiar los limites, si no se cargan dos seguidos y chocan
+      // (medido: la recarga del de ahora y la carga del nuevo a la vez fallaron al leer los pesos a la video memoria)
+      const changing = firstPath !== (main.model?.path || '');
+
+      if(changing && main.generation !== 'off'){
+        await askEngine('POST', '/api/models/unload', null, 180000);
+      }
+
+      await askEngine('POST', '/api/pool', settings, 20000);
+
+      if(changing || main.generation !== 'ready'){
+        await askEngine('POST', '/api/models/load', {path: firstPath}, 30000);
+      }
+
+      await waitFor(async () => (await askEngine('GET', '/api/pool', null, 3000)).generation === 'loading', 15000, 300);
+      await waitFor(async () => ['ready', 'failed'].includes((await askEngine('GET', '/api/pool', null, 3000)).generation), 900000, 2000);
+
+      if((await askEngine('GET', '/api/pool', null, 3000)).generation !== 'ready'){
+        throw new Error('The first model could not load with its share, look at master.log');
+      }
+
+      // medido con IQ3_S y IQ1_M: si el segundo carga antes de la primera respuesta del primero, el primero ya no tiene donde
+      // reservar lo suyo y todas sus respuestas fallan sin memoria, asi que primero contesta y despues se mide lo libre
+      second.step = 'The first model gets ready';
+      await warmUp(await engineBase());
     }
-
-    // otro modelo primero: se descarga el de ahora antes de cambiar los limites, si no se cargan dos seguidos y chocan
-    // (medido: la recarga del de ahora y la carga del nuevo a la vez fallaron al leer los pesos a la video memoria)
-    const changing = firstPath !== (main.model?.path || '');
-
-    if(changing && main.generation !== 'off'){
-      await askEngine('POST', '/api/models/unload', null, 180000);
-    }
-
-    await askEngine('POST', '/api/pool', settings, 20000);
-
-    if(changing || main.generation !== 'ready'){
-      await askEngine('POST', '/api/models/load', {path: firstPath}, 30000);
-    }
-
-    await waitFor(async () => (await askEngine('GET', '/api/pool', null, 3000)).generation === 'loading', 15000, 300);
-    await waitFor(async () => ['ready', 'failed'].includes((await askEngine('GET', '/api/pool', null, 3000)).generation), 900000, 2000);
-
-    if((await askEngine('GET', '/api/pool', null, 3000)).generation !== 'ready'){
-      throw new Error('The first model could not load with its share, look at master.log');
-    }
-
-    // medido con IQ3_S y IQ1_M: si el segundo carga antes de la primera respuesta del primero, el primero ya no tiene donde
-    // reservar lo suyo y todas sus respuestas fallan sin memoria, asi que primero contesta y despues se mide lo libre
-    second.step = 'The first model gets ready';
-    await warmUp(await engineBase());
 
     // al segundo le toca lo que el primero de verdad dejo bajo la mitad de la ram: medido, windows le cuenta al primero
     // unos 4.7 GB mas que lo que fija para expertos (35 → 39.7, 29 → 33.7) y al segundo menos de 1 GB mas;

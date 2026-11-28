@@ -1,0 +1,1 @@
+{"messages": [{"role": "user", "content": "Repeat: read_file, terminal_list, foo_bar_baz: {\"a\": 1, \"b\": [2, 3]} __init__ x_y  two  spaces\n\nnew lines\ttab 12345 3.14 CamelCaseWord HTTPServer don't I'LL émigré naïve 日本語 😀 a//b ../src/main.js"}], "effort": "none"}

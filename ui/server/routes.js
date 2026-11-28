@@ -21,7 +21,6 @@ import { answerApproval, approveRun, queueFor, runStore, stopChildren } from './
 import { pickFiles, pickFolder } from './picker.js';
 import { accessModes, normalizeMode } from './gate.js';
 import { toolCreateFolder, toolDeletePath, toolGrepFiles, toolListFiles, toolListProjects, toolProposePatch, toolReadFile, toolRenamePath, toolSandboxRun, toolWriteFile } from './tools.js';
-import { programPath, stopProgram } from './system.js';
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -160,14 +159,15 @@ router.post('/engine/restart', async (req, res) => {
     await saveSettings({ ...settings, vramReserveGb, ramReserveGb, ssdMaxGb });
 
     const motorRoot = path.resolve(paths.appRoot, '..');
-    const masterExe = programPath(motorRoot, 'master');
+    const masterExe = path.join(motorRoot, 'master.exe');
 
     if(!await pathExists(masterExe)){
-      return res.status(404).json({ message: 'The engine was not found, build it first.' });
+      return res.status(404).json({ message: 'master.exe not found, build the engine first.' });
     }
 
-    await stopProgram(masterExe);
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => {
+      execFile('powershell', ['-NoProfile', '-Command', `Get-Process master -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '${masterExe}' } | Stop-Process -Force`], () => setTimeout(r, 1000));
+    });
 
     const child = spawn(masterExe, ['8000', '127.0.0.1', '9090', 'modelos'], {
       cwd: motorRoot,
@@ -242,7 +242,7 @@ router.post('/style/remove', async (req, res) => {
 });
 
 router.put('/settings', async (req, res) => {
-  const {model, accessMode, allowNetwork, language, contextMessages, maxToolLoops, reverseTool, ghidraPort, idaPort, providerBaseUrl, providerApiKey, numCtx, temperature, thinkDepth, thinkCap, imageBaseUrl, imageModel, imageApiKey} = req.body ?? {};
+  const {model, accessMode, allowNetwork, language, contextMessages, maxToolLoops, reverseTool, agentEdits, globalMemory, ghidraPort, idaPort, providerBaseUrl, providerApiKey, numCtx, temperature, thinkDepth, thinkCap, imageBaseUrl, imageModel, imageApiKey} = req.body ?? {};
 
   if(accessMode !== undefined && ![...accessModes, 'ask', 'full'].includes(accessMode)){
     return res.status(400).json({message: 'accessMode must be manual, plan or auto.'});
@@ -275,6 +275,8 @@ router.put('/settings', async (req, res) => {
       contextMessages: Math.min(60, Math.max(4, Number(contextMessages || current.contextMessages))),
       maxToolLoops: Math.min(50, Math.max(1, Number(maxToolLoops || current.maxToolLoops))),
       reverseTool: ['auto', 'ghidra', 'ida'].includes(reverseTool) ? reverseTool : current.reverseTool,
+      agentEdits: typeof agentEdits === 'boolean' ? agentEdits : current.agentEdits !== false,
+      globalMemory: typeof globalMemory === 'boolean' ? globalMemory : current.globalMemory === true,
       ghidraPort: nextGhidraPort,
       idaPort: nextIdaPort,
       providerBaseUrl: cleanText(providerBaseUrl === undefined ? current.providerBaseUrl : providerBaseUrl) || 'http://localhost:8000/v1',
@@ -469,7 +471,8 @@ router.post('/projects/pick', async (req, res) => {
 
 router.get('/projects/:project/files', async (req, res) => {
   try {
-    return res.status(200).json({files: await toolListFiles({project: req.params.project})});
+    const out = await toolListFiles({project: req.params.project, maxItems: 2500});
+    return res.status(200).json(Array.isArray(out) ? {files: out} : out);
   } catch(err) {
     return res.status(500).json({message: err.message});
   }
@@ -895,7 +898,8 @@ const runChat = async ({body, control, onEvent}) => {
     mode: normalizeMode(accessMode || chat?.accessMode, settings.accessMode),
     signal: control.abort.signal,
     onEvent,
-    children: new Set()
+    children: new Set(),
+    subagents: new Map()
   };
 
   control.run = run;
@@ -965,6 +969,32 @@ router.post('/chat/steer', async (req, res) => {
 
   if(text || image){
     control.steer.push({text, image});
+  }
+
+  return res.status(200).json({active: true, queued: true});
+});
+
+router.post('/chat/subagent/stop', async (req, res) => {
+  const sub = liveRuns.get(cleanText(req.body?.chatId))?.run?.subagents?.get(cleanText(req.body?.subagentId));
+
+  if(!sub){
+    return res.status(200).json({active: false});
+  }
+
+  sub.abort.abort();
+  return res.status(200).json({active: true, stopped: true});
+});
+
+router.post('/chat/subagent/steer', async (req, res) => {
+  const sub = liveRuns.get(cleanText(req.body?.chatId))?.run?.subagents?.get(cleanText(req.body?.subagentId));
+  const text = cleanText(req.body?.message);
+
+  if(!sub){
+    return res.status(200).json({active: false});
+  }
+
+  if(text){
+    sub.steer.push(text);
   }
 
   return res.status(200).json({active: true, queued: true});

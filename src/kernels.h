@@ -366,6 +366,28 @@ __device__ float dotGroup(int type, const u8* block, int g, const float* x, cons
         return d * sum + m * total;
     }
 
+    if(type == 11){
+        float d = half(word(block + 108));
+        int halfIdx = g >> 2, l = g & 3, shift = 2 * l;
+        u8 m = (u8)(1u << g);
+        const u8* qp = block + 32 + 32 * halfIdx;
+        auto rd32 = [](const u8* p){ return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); };
+        u32 a0 = rd32(block + 96), a1 = rd32(block + 100), a2 = rd32(block + 104);
+        u32 uw = g < 2 ? ((a0 & 0x0f0f0f0fu) | ((a2 & 0x03030303u) << 4))
+               : g < 4 ? ((a1 & 0x0f0f0f0fu) | (((a2 >> 2) & 0x03030303u) << 4))
+               : g < 6 ? (((a0 >> 4) & 0x0f0f0f0fu) | (((a2 >> 4) & 0x03030303u) << 4))
+               : (((a1 >> 4) & 0x0f0f0f0fu) | (((a2 >> 6) & 0x03030303u) << 4));
+        int sshift = 16 * (g & 1);
+        float dl0 = d * (float)((int)((uw >> sshift) & 255u) - 32);
+        float dl1 = d * (float)((int)((uw >> (sshift + 8)) & 255u) - 32);
+        float sum0 = 0.0f, sum1 = 0.0f;
+        for(int k = 0; k < 16; k++){
+            sum0 += (float)(((qp[k] >> shift) & 3) - ((block[k] & m) ? 0 : 4)) * x[k];
+            sum1 += (float)(((qp[16 + k] >> shift) & 3) - ((block[16 + k] & m) ? 0 : 4)) * x[16 + k];
+        }
+        return dl0 * sum0 + dl1 * sum1;
+    }
+
     return 0.0f;
 }
 
@@ -380,6 +402,7 @@ __device__ __forceinline__ int blockBytes(int type) {
         case 30: return 64;
         case 7: return 24;
         case 8: return 34;
+        case 11: return 110;
         case 12: return 144;
         case 13: return 176;
         case 14: return 210;
@@ -416,6 +439,32 @@ __device__ __forceinline__ int table4(const i8* table, u32 nibbles) {
 }
 
 __device__ float dotGroupQ8(int type, const u8* block, int g, const int* q, float dx, int qsum, const GridTables& t) {
+    if(type == 11){
+        float d = half(word(block + 108));
+        int halfIdx = g >> 2, l = g & 3, shift = 2 * l;
+        const u8* qp = block + 32 + 32 * halfIdx;
+        int sum0 = 0, sum1 = 0;
+        #pragma unroll
+        for(int i = 0; i < 8; i++){
+            u32 qv = (load32(qp + 4 * i) >> shift) & 0x03030303u;
+            u32 hbits = (load32(block + 4 * i) >> g) & 0x01010101u;
+            u32 sub = __vsub4(0x01010101u, hbits) * 4u;
+            int w4 = (int)__vsub4(qv, sub);
+            if(i < 4) sum0 = __dp4a(w4, q[i], sum0);
+            else sum1 = __dp4a(w4, q[i], sum1);
+        }
+        auto rd32 = [](const u8* p){ return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24); };
+        u32 a0 = rd32(block + 96), a1 = rd32(block + 100), a2 = rd32(block + 104);
+        u32 uw = g < 2 ? ((a0 & 0x0f0f0f0fu) | ((a2 & 0x03030303u) << 4))
+               : g < 4 ? ((a1 & 0x0f0f0f0fu) | (((a2 >> 2) & 0x03030303u) << 4))
+               : g < 6 ? (((a0 >> 4) & 0x0f0f0f0fu) | (((a2 >> 4) & 0x03030303u) << 4))
+               : (((a1 >> 4) & 0x0f0f0f0fu) | (((a2 >> 6) & 0x03030303u) << 4));
+        int sshift = 16 * (g & 1);
+        float dl0 = (float)((int)((uw >> sshift) & 255u) - 32);
+        float dl1 = (float)((int)((uw >> (sshift + 8)) & 255u) - 32);
+        return d * dx * (dl0 * (float)sum0 + dl1 * (float)sum1);
+    }
+
     if(type == 12 || type == 13){
         float d = half(word(block));
         float dmin = half(word(block + 2));

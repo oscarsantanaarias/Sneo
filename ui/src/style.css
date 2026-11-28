@@ -5201,3 +5201,107 @@ textarea:focus {
   gap: 6px;
   margin: 10px 0 4px;
 }
+
+.subagents-live {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.subagent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 230px;
+  padding: 12px 13px;
+  background: var(--bg-2);
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+}
+
+.subagent-card.subagent-running {
+  border-color: var(--accent-line);
+}
+
+.subagent-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.subagent-title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.subagent-title strong {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.subagent-title span {
+  font-size: 11px;
+  color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subagent-activity {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.subagent-step {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent-hi);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subagent-thought {
+  font-size: 12px;
+  color: var(--text-faint);
+  line-height: 1.45;
+  max-height: 155px;
+  overflow-y: auto;
+  padding-right: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  scrollbar-width: thin;
+}
+
+.subagent-steer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subagent-steer input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}

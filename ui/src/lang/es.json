@@ -819,7 +819,8 @@
   "Load its model first": "Primero carga su modelo",
   "The model of {0} is not loaded yet. Load it in Agents, Models.": "El modelo de {0} todavía no está cargado. Cárgalo en Agentes, Modelos.",
   "Load the models of these agents first": "Primero carga los modelos de estos agentes",
-  "Load the models of the team first, in Models": "Primero carga los modelos del equipo, en Modelos",
+  "Load the models of the team first, in Models": "Primero carga los modelos del equipo, en Modelos"
+,
   "Opening the model": "Abriendo el modelo",
   "Building the GPU kernels": "Armando los kernels de la GPU",
   "Reading the weights into video memory": "Leyendo los pesos a la memoria de video",
@@ -957,5 +958,16 @@
   "What goes back to the agent that gave the work. Short: what was done, the files and what is left, the full answer stays in the panel. It saves tokens because the report stays in the conversation of the agent that asked and is read again on each of its turns": "Lo que vuelve al agente que dio el encargo. Cortos: qué se hizo, los archivos y qué falta, la respuesta entera queda en el panel. Ahorra tokens porque el reporte queda en la conversación del agente que pidió y lo vuelve a leer en cada turno suyo",
   "Reports": "Reportes",
   "Short": "Cortos",
-  "Whole": "Completos"
+  "Whole": "Completos",
+  "Agents in Workspace": "Agentes en Workspace",
+  "Allow AI subagents in Workspace to write files and use the same permissions as the main agent.": "Permite que los subagentes de la IA en Workspace escriban archivos y usen los mismos permisos que el agente principal.",
+  "Subagent permissions": "Permisos de los subagentes",
+  "Global memory": "Memoria global",
+  "When enabled, saved memories from previous chats are injected into new conversations.": "Cuando está activado, las memorias guardadas de chats anteriores se inyectan en las conversaciones nuevas.",
+  "Enabled": "Activado",
+  "Read-only": "Solo lectura",
+  "When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.": "Cuando está activado, parallel_agents y orchestrate pueden editar archivos y ejecutar comandos con los mismos permisos de tu workspace.",
+  "Load second only": "Cargar solo el segundo",
+  "Stop this subagent": "Parar este subagente",
+  "Message {0}...": "Hablarle a {0}..."
 }

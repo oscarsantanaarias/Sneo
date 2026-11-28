@@ -208,6 +208,28 @@ __device__ __forceinline__ int table16(u32 t0, u32 t1, u32 t2, u32 t3, u32 nibbl
 
 __device__ __forceinline__ void unpackGroup(int type, const u8* block, int g, int* w, float& low, float& high, float& offset, const GridTables& t) {
     offset = 0.0f;
+    if(type == 11){
+        float d = half(word(block + 108));
+        int halfIdx = g >> 2, l = g & 3, shift = 2 * l;
+        const u8* qp = block + 32 + 32 * halfIdx;
+        #pragma unroll
+        for(int i = 0; i < 8; i++){
+            u32 qv = (load32(qp + 4 * i) >> shift) & 0x03030303u;
+            u32 hbits = (load32(block + 4 * i) >> g) & 0x01010101u;
+            u32 sub = __vsub4(0x01010101u, hbits) * 4u;
+            w[i] = (int)__vsub4(qv, sub);
+        }
+        u32 a0 = load32(block + 96), a1 = load32(block + 100), a2 = load32(block + 104);
+        u32 uw = g < 2 ? ((a0 & 0x0f0f0f0fu) | ((a2 & 0x03030303u) << 4))
+               : g < 4 ? ((a1 & 0x0f0f0f0fu) | (((a2 >> 2) & 0x03030303u) << 4))
+               : g < 6 ? (((a0 >> 4) & 0x0f0f0f0fu) | (((a2 >> 4) & 0x03030303u) << 4))
+               : (((a1 >> 4) & 0x0f0f0f0fu) | (((a2 >> 6) & 0x03030303u) << 4));
+        int sshift = 16 * (g & 1);
+        low = d * (float)((int)((uw >> sshift) & 255u) - 32);
+        high = d * (float)((int)((uw >> (sshift + 8)) & 255u) - 32);
+        return;
+    }
+
     if(type == 12 || type == 13){
         float d = half(word(block));
         float dmin = half(word(block + 2));
@@ -852,6 +874,7 @@ extern "C" __global__ void __launch_bounds__(256, 2) dotRowsW##T(int type, const
 extern "C" __global__ void __launch_bounds__(256, 2) dotRowsW##T##c(int type, const u8* weights, u64 rowBytes, u64 expertBytes, const int* groupSlot, const int* groupStart, const int* groupCount, const int* inputIndex, const i8* packed, const float* scales, const int* sums, const i8* fine, const float* fineScales, const int* fineSums, float* output, int rows, int cols, int count, int tiles, const int* tokenOf, const float* weightOf, unsigned long long* gather, GridTables t) { dotRowsBody<T, false, true>(weights, rowBytes, expertBytes, groupSlot, groupStart, groupCount, inputIndex, packed, scales, sums, fine, fineScales, fineSums, output, rows, cols, count, tiles, tokenOf, weightOf, gather, t); }
 DOT_ROWS(7)
 DOT_ROWS(8)
+DOT_ROWS(11)
 DOT_ROWS(12)
 DOT_ROWS(13)
 DOT_ROWS(14)
@@ -1964,6 +1987,7 @@ __device__ __forceinline__ void typedRows(const u8* weights, u64 rowBytes, const
 
 #define TYPED_ROWS(T, N) extern "C" __global__ void rowsType##T##x##N(const u8* weights, u64 rowBytes, const i8* packed, const float* scales, const int* sums, const i8* fine, const float* fineScales, const int* fineSums, float* output, int rows, int cols, int stageBytes, GridTables t) { typedRows<T, N, false>(weights, rowBytes, packed, scales, sums, fine, fineScales, fineSums, output, rows, cols, stageBytes, t); } extern "C" __global__ void rowsDirect##T##x##N(const u8* weights, u64 rowBytes, const i8* packed, const float* scales, const int* sums, const i8* fine, const float* fineScales, const int* fineSums, float* output, int rows, int cols, int stageBytes, GridTables t) { typedRows<T, N, true>(weights, rowBytes, packed, scales, sums, fine, fineScales, fineSums, output, rows, cols, stageBytes, t); }
 #define TYPED_COUNTS(T) TYPED_ROWS(T, 1) TYPED_ROWS(T, 2) TYPED_ROWS(T, 3) TYPED_ROWS(T, 4) TYPED_ROWS(T, 5) TYPED_ROWS(T, 6) TYPED_ROWS(T, 7) TYPED_ROWS(T, 8) TYPED_ROWS(T, 9)
+TYPED_COUNTS(11)
 TYPED_COUNTS(12)
 TYPED_COUNTS(13)
 TYPED_COUNTS(14)
@@ -2046,6 +2070,7 @@ __device__ __forceinline__ void pairRows(const u8* weights, u64 rowBytes, const 
 
 #define PAIR_ROWS(T, N) extern "C" __global__ void rowsPair##T##x##N(const u8* weights, u64 rowBytes, const i8* packed, const float* scales, const int* sums, const i8* fine, const float* fineScales, const int* fineSums, float* output, int rows, int cols, int stageBytes, GridTables t) { pairRows<T, N>(weights, rowBytes, packed, scales, sums, fine, fineScales, fineSums, output, rows, cols, t); }
 #define PAIR_COUNTS(T) PAIR_ROWS(T, 1) PAIR_ROWS(T, 2) PAIR_ROWS(T, 3) PAIR_ROWS(T, 4) PAIR_ROWS(T, 5) PAIR_ROWS(T, 6) PAIR_ROWS(T, 7) PAIR_ROWS(T, 8) PAIR_ROWS(T, 9)
+PAIR_COUNTS(11)
 PAIR_COUNTS(12)
 PAIR_COUNTS(13)
 PAIR_COUNTS(14)
@@ -2253,6 +2278,7 @@ __device__ __forceinline__ void fewTensor(const u8* weights, u64 rowBytes, const
 
 #define FEW_TENSOR(T, TILES) extern "C" __global__ void __launch_bounds__(256) rowsMma##T##t##TILES(const u8* weights, u64 rowBytes, const i8* packed, const float* scales, const int* sums, const i8* fine, const float* fineScales, const int* fineSums, float* output, int rows, int cols, int count, GridTables t) { fewTensor<T, TILES>(weights, rowBytes, packed, scales, sums, fine, fineScales, fineSums, output, rows, cols, count, t); }
 #define FEW_TENSORS(T) FEW_TENSOR(T, 1) FEW_TENSOR(T, 2)
+FEW_TENSORS(11)
 FEW_TENSORS(12)
 FEW_TENSORS(13)
 FEW_TENSORS(14)

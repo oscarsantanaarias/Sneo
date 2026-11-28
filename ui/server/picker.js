@@ -1,6 +1,5 @@
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { onWindows } from './system.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -80,11 +79,6 @@ public static class SneoFolderPicker {
 
 // varios archivos con la ventana de abrir de windows encima de sneo
 export const pickFiles = async ({title = 'Select files'} = {}) => {
-  // en linux van las ventanas de zenity, que trae casi cualquier escritorio
-  if(!onWindows){
-    const result = await execFileAsync('zenity', ['--file-selection', '--multiple', '--separator=\n', `--title=${String(title || '')}`], {timeout: 300000, maxBuffer: 1024 * 100}).catch(() => ({stdout: ''}));
-    return String(result.stdout || '').split(/\r?\n/).map(item => item.trim()).filter(Boolean);
-  }
   const script = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\nAdd-Type -AssemblyName System.Windows.Forms\n$owner = New-Object System.Windows.Forms.Form\n$owner.TopMost = $true\n$dialog = New-Object System.Windows.Forms.OpenFileDialog\n$dialog.Multiselect = $true\n$dialog.Title = $env:SNEO_PICK_TITLE\nif($dialog.ShowDialog($owner) -eq 'OK'){ $dialog.FileNames -join \"`n\" }";
   const result = await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
     timeout: 300000,
@@ -97,11 +91,6 @@ export const pickFiles = async ({title = 'Select files'} = {}) => {
 
 // los textos van por variables de entorno, nunca dentro del script, asi ninguna comilla puede cerrar el texto
 export const pickFolder = async ({title = 'Select a folder', start = '', button = 'Select folder'} = {}) => {
-  if(!onWindows){
-    const where = start ? [`--filename=${String(start).replace(/\/*$/, '/')}`] : [];
-    const result = await execFileAsync('zenity', ['--file-selection', '--directory', `--title=${String(title || '')}`, ...where], {timeout: 300000, maxBuffer: 1024 * 100}).catch(() => ({stdout: ''}));
-    return String(result.stdout || '').trim();
-  }
   const script = `$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\nAdd-Type -TypeDefinition @'${folderDialog}'@\n[SneoFolderPicker]::Pick($env:SNEO_PICK_TITLE, $env:SNEO_PICK_START, $env:SNEO_PICK_BUTTON)`;
   const result = await execFileAsync('powershell.exe', ['-NoProfile', '-STA', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
     timeout: 300000,

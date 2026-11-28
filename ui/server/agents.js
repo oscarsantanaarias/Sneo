@@ -523,11 +523,15 @@ export const toolParallelAgents = async ({project, task, agents}, run) => {
     {name: 'Tester', role: 'Test in sandbox and summarize results.'}
   ];
 
+  const settings = await readSettings();
+  const canEdit = settings.agentEdits !== false;
   const results = await Promise.all(cleanAgents.slice(0, 5).map(agent => runSubAgent({
     name: cleanText(agent.name) || 'Subagent',
     role: cleanText(agent.role) || 'Review',
     task: cleanTask,
     project: cleanProject,
+    rounds: canEdit ? 12 : 6,
+    canEdit,
     run
   })));
 
@@ -559,7 +563,7 @@ ${parts.join('\n\n')}`;
 };
 
 // las herramientas que suma un agente que escribe codigo, con los mismos permisos que el workspace
-const editTools = ['replace_in_file', 'write_file', 'create_folder', 'rename_path', 'run_command'];
+const editTools = ['replace_in_file', 'write_file', 'create_folder', 'rename_path', 'delete_path', 'run_command'];
 
 // lo que se muestra al lado de cada herramienta en el panel del agente
 const stepDetail = (args) => {
@@ -569,7 +573,7 @@ const stepDetail = (args) => {
 };
 
 // los resultados viejos se recortan para que un agente con muchas vueltas no se pase del contexto
-const toolResultBudget = 150000;
+const toolResultBudget = 300000;
 const isToolResult = (item) => item.role === 'tool' || (item.role === 'user' && /^Tool \S+ result:\n/.test(String(item.content || '')));
 const shrinkResults = (messages) => {
   let total = messages.reduce((sum, item) => sum + String(item.content || '').length, 0);
@@ -590,12 +594,12 @@ ${persona || `You are subagent ${name}. Role: ${role}.\nYou work in parallel wit
 Active project: ${project || 'none'}.
 
 Allowed tools (call them with native function calling):
-list_files, read_file, read_range, glob, grep, search_files, ghidra, ida, re_search, sandbox_run, git_status, git_diff, codebase_search${canEdit ? ', replace_in_file, write_file, create_folder, rename_path, run_command' : ''}.
+list_files, read_file, read_range, glob, grep, search_files, ghidra, ida, re_search, sandbox_run, git_status, git_diff, codebase_search${canEdit ? ', replace_in_file, write_file, create_folder, rename_path, delete_path, run_command, web_search, fetch_url' : ''}.
 
-${canEdit ? 'Change files with replace_in_file (exact text to replace) and write_file only for new files. Read a file before you edit it. After editing, run it to check it works.' : 'Do not write or delete files.'}
+${canEdit ? 'You have the same workspace permissions as the main agent. Change files with replace_in_file (exact text to replace) and write_file for new files. Read a file before you edit it. After editing, run it to check it works.' : 'Do not write or delete files.'}
 Deliver clear findings, risks and the next step.
 `.trim();
-  const toolList = canEdit ? [...subAgentToolSchemas, ...toolSchemas.filter(item => editTools.includes(item.function?.name))] : subAgentToolSchemas;
+  const toolList = canEdit ? toolSchemas.filter(item => !['parallel_agents', 'orchestrate'].includes(item.function?.name)) : subAgentToolSchemas;
 
   const messages = [
     {role: 'system', content: system},
@@ -603,7 +607,34 @@ Deliver clear findings, risks and the next step.
     {role: 'user', content: task}
   ];
   const tools = [];
-  const subRun = run ? {...run, onEvent: null} : null;
+  const liveId = !onStep && run?.onEvent ? `sub_${Date.now()}_${Math.random().toString(36).slice(2, 7)}` : '';
+  const subControl = liveId ? {abort: new AbortController(), steer: []} : null;
+  if(liveId){
+    run.subagents = run.subagents || new Map();
+    run.subagents.set(liveId, subControl);
+  }
+  const subSignal = subControl
+    ? (run?.signal ? AbortSignal.any([run.signal, subControl.abort.signal]) : subControl.abort.signal)
+    : run?.signal;
+  const subRun = run ? {...run, signal: subSignal, onEvent: null} : null;
+  const emitSub = liveId
+    ? (patch) => run.onEvent?.({type: 'subagent', subagent: {id: liveId, name, role, ...patch}})
+    : null;
+  const stepHandler = onStep || (emitSub
+    ? (ev) => {
+        if(ev?.thought) emitSub({status: 'running', thought: ev.thought});
+        else if(ev?.tool) emitSub({status: 'running', step: ev.detail ? `${ev.tool}: ${ev.detail}` : ev.tool});
+      }
+    : null);
+  const drainSubSteer = () => {
+    if(!subControl?.steer.length) return false;
+    while(subControl.steer.length){
+      messages.push({role: 'user', content: `[User message]: ${subControl.steer.shift()}`});
+    }
+    emitSub?.({status: 'running', step: 'Received user message...'});
+    return true;
+  };
+  emitSub?.({status: 'running', step: 'Starting...'});
 
   const repeats = new Map();
   const repeated = (tool, args) => {
@@ -613,11 +644,22 @@ Deliver clear findings, risks and the next step.
     return count > 2;
   };
 
+  try {
   for(let i = 0; i < rounds; i++){
+    if(subSignal?.aborted){
+      emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+      return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    }
+    drainSubSteer();
+    emitSub?.({status: 'running', step: i === 0 ? 'Thinking...' : `Round ${i + 1}...`});
     shrinkResults(messages);
     const reply = route
       ? await askRoute(route, messages, toolList, subRun)
       : await askModelChat(messages, toolList, subRun, model);
+    if(subSignal?.aborted){
+      emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+      return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    }
     const rawAnswer = reply.content || '';
     const answer = rawAnswer
       .replace(/<think>[\s\S]*?<\/think>/gi, '')
@@ -627,7 +669,7 @@ Deliver clear findings, risks and the next step.
     const thinking = String(reply.reasoning || (rawAnswer.match(/<think>([\s\S]*?)(<\/think>|$)/i) || [])[1] || '').trim();
 
     if(thinking){
-      onStep?.({thought: thinking.slice(-2000)});
+      stepHandler?.({thought: thinking.slice(-2000)});
     }
 
     if(nativeCalls.length){
@@ -635,8 +677,12 @@ Deliver clear findings, risks and the next step.
       messages.push({role: 'assistant', content: answer, tool_calls: calls.map(call => call.args ? call.item : {...call.item, function: {...call.item.function, arguments: '{}'}}), ...(reply.raw ? {_claude: reply.raw} : {})});
 
       for(const call of calls){
+        if(subSignal?.aborted){
+          emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+          return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+        }
         const asked = call.item.function?.name || '';
-        onStep?.({tool: asked, detail: stepDetail(call.args)});
+        stepHandler?.({tool: asked, detail: stepDetail(call.args)});
         const resolved = resolveCall(asked, call.args || {}, '');
         const toolName = resolved.name || asked;
         const callArgs = normalizeToolArgs(toolName, resolved.args || {}, null);
@@ -650,13 +696,13 @@ Deliver clear findings, risks and the next step.
           result = {error: 'Arguments were not valid JSON, nothing was run. Send the call again with valid JSON arguments.'};
         } else if(resolved.error){
           result = {error: resolved.error, hint: resolved.hint};
-        } else if(resolved.calls){
+        } else if(resolved.calls && !canEdit){
           result = {error: 'Subagents can only read. Report the change you would make instead.'};
         } else {
           try {
             result = repeated(toolName, callArgs)
               ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
-              : canEdit && editTools.includes(toolName)
+              : canEdit
                 ? await runTool(toolName, callArgs)
                 : await runSubTool(toolName, callArgs);
           } catch(e) {
@@ -670,7 +716,7 @@ Deliver clear findings, risks and the next step.
         }
 
         tools.push({tool: toolName, args: callArgs, result});
-        messages.push({role: 'tool', tool_call_id: call.item.id, content: toon(result).slice(0, 6000)});
+        messages.push({role: 'tool', tool_call_id: call.item.id, content: toon(result).slice(0, canEdit ? 12000 : 6000)});
       }
 
       continue;
@@ -685,6 +731,12 @@ Deliver clear findings, risks and the next step.
     }
 
     if(!calls.length){
+      if(subControl?.steer.length){
+        messages.push({role: 'assistant', content: answer});
+        drainSubSteer();
+        continue;
+      }
+      emitSub?.({status: 'done', step: answer.slice(0, 160)});
       return {name, role, answer, tools};
     }
 
@@ -692,6 +744,10 @@ Deliver clear findings, risks and the next step.
     const results = [];
 
     for(const call of calls){
+      if(subSignal?.aborted){
+        emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+        return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+      }
       const callArgs = {...(call.args || {})};
 
       await placeCall(call.tool, callArgs, project);
@@ -699,12 +755,12 @@ Deliver clear findings, risks and the next step.
       let result;
       const toolStart = Date.now();
 
-      onStep?.({tool: call.tool, detail: stepDetail(callArgs)});
+      stepHandler?.({tool: call.tool, detail: stepDetail(callArgs)});
 
       try {
         result = repeated(call.tool, callArgs)
           ? {error: 'You already ran this exact call twice. Use what it returned or try something different.'}
-          : canEdit && editTools.includes(call.tool)
+          : canEdit
             ? await runTool(call.tool, callArgs)
             : await runSubTool(call.tool, callArgs);
       } catch(e) {
@@ -717,7 +773,7 @@ Deliver clear findings, risks and the next step.
       }
 
       tools.push({tool: call.tool, args: callArgs, result});
-      results.push(`Tool ${call.tool} result:\n${toon(result).slice(0, 6000)}`);
+      results.push(`Tool ${call.tool} result:\n${toon(result).slice(0, canEdit ? 12000 : 6000)}`);
     }
 
     i += calls.length - 1;
@@ -733,17 +789,31 @@ Deliver clear findings, risks and the next step.
       ? await askRoute(route, messages, null, subRun)
       : await askModelChat(messages, null, subRun, model);
     const answer = String(reply.content || '').replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*$/gi, '').trim();
-    if(answer) return {name, role, answer, tools};
+    if(answer){
+      emitSub?.({status: 'done', step: answer.slice(0, 160)});
+      return {name, role, answer, tools};
+    }
   } catch(e) {
     if(run?.signal?.aborted) throw e;
   }
 
+  emitSub?.({status: 'done', step: 'Finished tool calls.'});
   return {
     name,
     role,
     answer: 'The agent used all its tool calls without a final answer.',
     tools
   };
+  } catch(e) {
+    if(subControl?.abort.signal.aborted && !run?.signal?.aborted){
+      emitSub?.({status: 'stopped', step: 'Stopped by user.'});
+      return {name, role, answer: 'Stopped by user.', tools, stopped: true};
+    }
+    emitSub?.({status: subSignal?.aborted ? 'stopped' : 'error', step: String(e.message || e)});
+    throw e;
+  } finally {
+    if(liveId) run?.subagents?.delete(liveId);
+  }
 };
 
 const parsePlan = (text, maxN) => {
@@ -775,6 +845,7 @@ const MODE_PLAN = {
 
 export const orchestrate = async ({project, task, mode, maxAgents, onEvent, run}) => {
   const settings = await readSettings();
+  const canEdit = settings.agentEdits !== false;
   const subRun = run ? {...run, onEvent: null} : null;
   const bigModel = cleanText(settings.model) || 'qwen3-coder:30b';
   const workerModel = 'qwen2.5-coder:14b';
@@ -806,15 +877,20 @@ export const orchestrate = async ({project, task, mode, maxAgents, onEvent, run}
   const results = [];
 
   for(let i = 0; i < plan.length; i += wave){
+    if(run?.signal?.aborted) break;
     const batch = plan.slice(i, i + wave);
     onEvent?.({type: 'tool', tool: `orchestrator: wave ${Math.floor(i / wave) + 1}/${Math.ceil(plan.length / wave)} (${batch.map(item => item.role).join(', ')})`});
 
     const batchResults = await Promise.all(batch.map(item => runSubAgent({
       name: item.role,
       role: item.role,
-      task: `${item.goal}\n\n(Overall goal: ${cleanTask}). You are READ-ONLY: investigate and report concrete findings; if this is a build task, include the exact code you would write. Do NOT write files.`,
+      task: canEdit
+        ? `${item.goal}\n\n(Overall goal: ${cleanTask}). You have full workspace edit permissions: write and update the files directly with write_file / replace_in_file, and verify your work.`
+        : `${item.goal}\n\n(Overall goal: ${cleanTask}). You are READ-ONLY: investigate and report concrete findings; if this is a build task, include the exact code you would write. Do NOT write files.`,
       project: cleanProject,
       model: workerModel,
+      rounds: canEdit ? 12 : 6,
+      canEdit,
       run
     }).catch(e => ({name: item.role, role: item.role, answer: `error: ${e.message || e}`, tools: []}))));
 
@@ -831,6 +907,10 @@ export const orchestrate = async ({project, task, mode, maxAgents, onEvent, run}
     } catch(e) {
       judge = {error: String(e.message || e)};
     }
+  }
+
+  if(run?.signal?.aborted){
+    return {mode: kind, plan, agents: results.map(item => ({role: item.role, answer: item.answer})), judge, answer: 'Stopped by user.'};
   }
 
   onEvent?.({type: 'tool', tool: `orchestrator: synthesizing with ${bigModel}`});
@@ -1077,7 +1157,7 @@ export const getAgentAnswer = async (options = {}) => {
 
   const skills = await loadSkills();
   const skillsBlock = buildSkillsBlock(skills);
-  const memoryBlock = await buildMemoryBlock();
+  const memoryBlock = settings.globalMemory === true ? await buildMemoryBlock() : '';
   const reverseAsked = [message, ...history.filter(item => item?.role === 'user').slice(-3).map(item => typeof item.content === 'string' ? item.content : '')].join('\n');
   const reverseTalk = /\b(ghidra|ida|ida_bridge|decompil\w*|disassembl\w*|desensambl\w*|xrefs?|reversing|reverse engineering|re_search|re_map|re_index)\b/i.test(reverseAsked)
     || (addressRe.test(String(message || '')) && reverseAskRe.test(String(message || '')));

@@ -425,13 +425,14 @@ inline void blockDots(const uint8_t* row, int cols, const HostPacked& in, size_t
     const __m256i spread = _mm256_setr_epi8(0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3);
     const __m256i pick = _mm256_set1_epi64x((long long)0x8040201008040201ULL);
     const __m256i unit = _mm256_set1_epi8(1);
-    __m256 even[COUNT], odd[COUNT];
+    constexpr bool splitAcc = COUNT <= 4;
+    __m256 even[COUNT], odd[splitAcc ? COUNT : 1];
     const int8_t* x[COUNT];
     const float* s[COUNT];
     for(int t = 0; t < COUNT; t++){
         size_t place = (at + (size_t)t * cols) / 32;
         even[t] = _mm256_setzero_ps();
-        odd[t] = _mm256_setzero_ps();
+        if constexpr(splitAcc) odd[t] = _mm256_setzero_ps();
         x[t] = in.levels.data() + 64 * place;
         s[t] = in.units.data() + 2 * place;
     }
@@ -510,13 +511,19 @@ inline void blockDots(const uint8_t* row, int cols, const HostPacked& in, size_t
             __m256i k = _mm256_and_si256(_mm256_srlv_epi32(_mm256_set1_epi32((int)nibbles), _mm256_setr_epi32(0, 4, 8, 12, 16, 20, 24, 28)), _mm256_set1_epi32(15));
             _mm256_store_ps(low, _mm256_mul_ps(_mm256_set1_ps(base), _mm256_cvtepi32_ps(_mm256_or_si256(_mm256_slli_epi32(k, 1), _mm256_set1_epi32(1)))));
         }
-        for(size_t g = 0; g < 8; g += 2){
-            group(block, g, 8 * b + g, even);
-            group(block, g + 1, 8 * b + g + 1, odd);
+        if constexpr(splitAcc){
+            for(size_t g = 0; g < 8; g += 2){
+                group(block, g, 8 * b + g, even);
+                group(block, g + 1, 8 * b + g + 1, odd);
+            }
+        } else {
+            for(size_t g = 0; g < 8; g++){
+                group(block, g, 8 * b + g, even);
+            }
         }
     }
     for(int t = 0; t < COUNT; t++){
-        __m256 acc = _mm256_add_ps(even[t], odd[t]);
+        __m256 acc = splitAcc ? _mm256_add_ps(even[t], odd[t]) : even[t];
         __m128 h = _mm_add_ps(_mm256_castps256_ps128(acc), _mm256_extractf128_ps(acc, 1));
         h = _mm_add_ps(h, _mm_movehl_ps(h, h));
         h = _mm_add_ss(h, _mm_movehdup_ps(h));

@@ -20,7 +20,7 @@ const findAgy = () => {
   ];
 
   for(const dir of String(process.env.PATH || '').split(path.delimiter)){
-    if(dir) places.push(path.join(dir, process.platform === 'win32' ? 'agy.exe' : 'agy'));
+    if(dir) places.push(path.join(dir, 'agy.exe'));
   }
 
   found = places.find(file => file && fs.existsSync(file)) || null;

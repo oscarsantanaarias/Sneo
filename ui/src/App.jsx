@@ -1,5 +1,5 @@
 import React from 'react';
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
@@ -359,8 +359,9 @@ const agoText = (when) => {
           : `${Math.floor(seconds / (86400 * 30))}mo`;
 };
 
-function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
+const ChatMessage = React.memo(function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
   const [changesOpen, setChangesOpen] = useState(true);
+  if(!item) return null;
   const isUser = item.role === 'user';
 
   if(isUser){
@@ -382,7 +383,8 @@ function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
       continue;
     }
 
-    const target = st.args?.file || st.args?.path || st.file;
+    const target = String(st.args?.file || st.args?.path || st.file || '');
+    if(!target) continue;
     const found = edits.find(entry => entry.target === target);
 
     if(found){
@@ -462,7 +464,7 @@ function ChatMessage({item, onOpenFile, canRunPlan = false, onRunPlan = null}) {
       )}
     </div>
   );
-}
+});
 
 function lineDiff(before, after) {
   const a = before.split('\n');
@@ -664,6 +666,8 @@ function FileItem({item, level = 0, onOpen, openFile, onContext}) {
 function App(){
   const [chats, setChats] = useState([]);
   const [activeChatId, setActiveChatId] = useState('');
+  const activeChatIdRef = useRef(activeChatId);
+  activeChatIdRef.current = activeChatId;
   const [messages, setMessages] = useState([]);
   const [projects, setProjects] = useState([]);
   const [project, setProject] = useState('');
@@ -681,6 +685,8 @@ function App(){
   const [liveSteps, setLiveSteps] = useState([]);
   const [liveThoughts, setLiveThoughts] = useState('');
   const [liveStatus, setLiveStatus] = useState('');
+  const [liveSubagents, setLiveSubagents] = useState([]);
+  const [subSteerText, setSubSteerText] = useState({});
   const [prefillLive, setPrefillLive] = useState(null);
   const [lastPrefill, setLastPrefill] = useState(null);
   const [elapsedSecs, setElapsedSecs] = useState(0);
@@ -710,6 +716,8 @@ function App(){
     contextMessages: 16,
     maxToolLoops: 50,
     reverseTool: 'auto',
+    agentEdits: true,
+    globalMemory: false,
     ghidraPort: 5093,
     idaPort: 5073
   });
@@ -1543,7 +1551,7 @@ function App(){
         throw new Error(res.message);
       }
 
-      setModels(res.models);
+      setModels(Array.isArray(res.models) ? res.models : []);
       setSettings(prev => ({
         ...prev,
         model: prev.model || res.currentModel
@@ -1576,7 +1584,8 @@ function App(){
 
         return {...chat, thinkDepth: old.thinkDepth, thinkCap: old.thinkCap};
       }));
-      selectChat(res.chats[0]);
+      const keep = activeChatIdRef.current && res.chats.some(c => c.id === activeChatIdRef.current);
+      if(!keep) selectChat(res.chats[0]);
 
     } catch(e) {
       await uiAlert(e.message);
@@ -1654,7 +1663,8 @@ function App(){
         throw new Error(res.message);
       }
 
-      setFiles(res.files);
+      const nextFiles = Array.isArray(res.files) ? res.files : (Array.isArray(res.files?.files) ? res.files.files : []);
+      setFiles(nextFiles);
 
     } catch(e) {
       await uiAlert(e.message);
@@ -1715,7 +1725,7 @@ function App(){
 
   const selectChat = (chat) => {
     setActiveChatId(chat.id);
-    setMessages(chat.messages || []);
+    setMessages(Array.isArray(chat.messages) ? chat.messages : []);
     setProject(chat.project || '');
     setOpenFile('');
     setFileContent('');
@@ -1777,6 +1787,13 @@ function App(){
     setSideUrl('');
     setEditorRequest({path: resolvedPath, line, nonce: Date.now()});
   };
+
+  const openProjectFileRef = useRef(null);
+  openProjectFileRef.current = openProjectFile;
+  const handleOpenProjectFile = useCallback((p, line = 0) => openProjectFileRef.current?.(p, line), []);
+  const runPlanRef = useRef(null);
+  runPlanRef.current = () => sendMessage({text: tr('Run the plan above, step by step.'), mode: 'auto'});
+  const handleRunPlan = useCallback(() => runPlanRef.current?.(), []);
 
   const closeOpenFile = () => {
     setOpenFile('');
@@ -2186,7 +2203,7 @@ function App(){
         body: JSON.stringify({
           chatId: activeChatId,
           message: cleanText,
-          history: messages.filter(item => !item.partial),
+          history: messages.filter(item => !item.partial).map(item => ({role: item.role, content: item.content})),
           project,
           reverseTool: settings.reverseTool,
           image: sentImage,
@@ -2242,6 +2259,19 @@ function App(){
                 return copy;
               }
               return [...prev, event.step];
+            });
+          }
+
+          if(event.type === 'subagent' && event.subagent?.id){
+            const sub = event.subagent;
+            setLiveSubagents(prev => {
+              const idx = prev.findIndex(item => item.id === sub.id);
+              if(idx >= 0){
+                const copy = [...prev];
+                copy[idx] = {...copy[idx], ...sub};
+                return copy;
+              }
+              return [...prev, sub];
             });
           }
 
@@ -2383,6 +2413,8 @@ function App(){
       setLiveSteps([]);
       setLiveThoughts('');
       setLiveStatus('');
+      setLiveSubagents([]);
+      setSubSteerText({});
       setPrefillLive(null);
       setLiveUsage(null);
       setLiveSpeed(null);
@@ -2538,13 +2570,13 @@ function App(){
         }}
       >
         <div className="chat-column">
-        {messages.map((item, index) => (
+        {(Array.isArray(messages) ? messages : []).map((item, index) => (
           <ChatMessage
             key={`${item.role}-${index}`}
             item={item}
-            onOpenFile={openProjectFile}
+            onOpenFile={handleOpenProjectFile}
             canRunPlan={!loading && index === messages.length - 1}
-            onRunPlan={() => sendMessage({text: tr('Run the plan above, step by step.'), mode: 'auto'})}
+            onRunPlan={handleRunPlan}
           />
         ))}
 
@@ -2565,6 +2597,75 @@ function App(){
                 : liveStatus}
               onOpenFile={openProjectFile}
             />
+            {liveSubagents.length > 0 && (
+              <div className="subagents-live">
+                {liveSubagents.map(sub => {
+                  const isRunning = sub.status === 'running';
+                  const draft = subSteerText[sub.id] || '';
+                  return (
+                    <div key={sub.id} className={`subagent-card subagent-${sub.status || 'running'}`}>
+                      <div className="subagent-head">
+                        <div className="subagent-title">
+                          <strong>{sub.name}</strong>
+                          {sub.role && <span>{sub.role}</span>}
+                        </div>
+                        <div className="subagent-controls">
+                          <span className={`state-pill ${isRunning ? 'pill-busy' : sub.status === 'done' ? 'pill-ok' : 'pill-bad'}`}>
+                            {tr(sub.status === 'done' ? 'Done' : sub.status === 'stopped' ? 'Stopped' : sub.status === 'error' ? 'Error' : 'Working')}
+                          </span>
+                          {isRunning && (
+                            <button
+                              type="button"
+                              className="icon-btn icon-danger"
+                              title={tr('Stop this subagent')}
+                              onClick={() => fetch(`${apiUrl}/api/chat/subagent/stop`, {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({chatId: activeChatId, subagentId: sub.id})
+                              }).catch(() => {})}
+                            >
+                              <i className="fa-solid fa-stop"></i>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {(sub.step || sub.thought) && (
+                        <div className="subagent-activity">
+                          {sub.step && <div className="subagent-step">{sub.step}</div>}
+                          {sub.thought && isRunning && <div className="subagent-thought">{sub.thought.slice(-1500)}</div>}
+                        </div>
+                      )}
+                      {isRunning && (
+                        <form
+                          className="subagent-steer"
+                          onSubmit={(e) => {
+                            e.preventDefault();
+                            const msg = draft.trim();
+                            if(!msg) return;
+                            setSubSteerText(prev => ({...prev, [sub.id]: ''}));
+                            fetch(`${apiUrl}/api/chat/subagent/steer`, {
+                              method: 'POST',
+                              headers: {'Content-Type': 'application/json'},
+                              body: JSON.stringify({chatId: activeChatId, subagentId: sub.id, message: msg})
+                            }).catch(() => {});
+                          }}
+                        >
+                          <input
+                            type="text"
+                            value={draft}
+                            onChange={(e) => setSubSteerText(prev => ({...prev, [sub.id]: e.target.value}))}
+                            placeholder={tr('Message {0}...', sub.name)}
+                          />
+                          <button type="submit" className="icon-btn" disabled={!draft.trim()} title={tr('Send')}>
+                            <i className="fa-solid fa-paper-plane"></i>
+                          </button>
+                        </form>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -3349,6 +3450,49 @@ function App(){
                 </div>
                 <div>
                   <button type="button" className="btn" onClick={pickStyleFiles}>{tr('Choose files...')}</button>
+                </div>
+              </section>
+
+              <section className="settings-section">
+                <div className="settings-section-head">
+                  <h3><i className="fa-solid fa-users-gear"></i>{tr('Agents in Workspace')}</h3>
+                  <p>{tr('Allow AI subagents in Workspace to write files and use the same permissions as the main agent.')}</p>
+                </div>
+
+                <div className="settings-grid">
+                  <div className="field field-wide">
+                    <span className="field-label">{tr('Subagent permissions')}</span>
+                    <div className="segmented">
+                      {[{value: true, label: 'Enabled'}, {value: false, label: 'Read-only'}].map(item => (
+                        <button
+                          key={String(item.value)}
+                          type="button"
+                          className={(settings.agentEdits ?? true) === item.value ? 'active' : ''}
+                          onClick={() => changeSetting('agentEdits', item.value)}
+                        >
+                          {tr(item.label)}
+                        </button>
+                      ))}
+                    </div>
+                    <em className="field-help">{tr('When enabled, parallel_agents and orchestrate can edit files and run commands with your workspace permissions.')}</em>
+                  </div>
+
+                  <div className="field field-wide">
+                    <span className="field-label">{tr('Global memory')}</span>
+                    <div className="segmented">
+                      {[{value: false, label: 'Disabled'}, {value: true, label: 'Enabled'}].map(item => (
+                        <button
+                          key={String(item.value)}
+                          type="button"
+                          className={(settings.globalMemory ?? false) === item.value ? 'active' : ''}
+                          onClick={() => changeSetting('globalMemory', item.value)}
+                        >
+                          {tr(item.label)}
+                        </button>
+                      ))}
+                    </div>
+                    <em className="field-help">{tr('When enabled, saved memories from previous chats are injected into new conversations.')}</em>
+                  </div>
                 </div>
               </section>
 

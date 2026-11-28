@@ -108,7 +108,7 @@ export const ensureLocalModel = async (route, signal) => {
   throw new Error(`${wanted.name} took too long to load`);
 };
 
-export const askRoute = async (route, messages, tools, run) => {
+const runRoute = async (route, messages, tools, run) => {
   await ensureLocalModel(route, run?.signal);
   if(route.kind === 'claude'){
     return await askClaude(route, messages, tools, run);
@@ -163,6 +163,10 @@ const withSlot = async (route, job) => {
       slot.running--;
     }
   }
+};
+
+export const askRoute = async (route, messages, tools, run) => {
+  return await withSlot(route, () => runRoute(route, messages, tools, run));
 };
 
 const MODE_PLAN = {
@@ -270,11 +274,11 @@ export const chatAgent = async ({agent, route, history, project, peers = [], rou
     const writer = clean.edits
       ? ' You are the one who changes the code: apply fixes yourself in the project files. Use replace_in_file with the exact text to change for edits, write_file only for new files, and run the code with sandbox_run or run_command to check it works. Never ask another agent to apply a change you can make, and say which files and lines you changed.'
       : ' You can only read the project. When something must change, describe the exact change and hand it to the agent that edits code. To review changes start with git_diff and read a whole file only when the diff does not show enough.';
-    const result = await withSlot(route, () => runWorker({name: clean.name, role: clean.focus || clean.name, task: last.content, project, route, run, onStep, history: past, persona: persona + writer, rounds, canEdit: clean.edits}));
+    const result = await runWorker({name: clean.name, role: clean.focus || clean.name, task: last.content, project, route, run, onStep, history: past, persona: persona + writer, rounds, canEdit: clean.edits});
     return {content: dropThinking(result.answer), tools: (result.tools || []).map(item => item.tool), thinking: ''};
   }
 
-  const reply = await withSlot(route, () => askRoute(route, [{role: 'system', content: persona}, ...past], null, run));
+  const reply = await askRoute(route, [{role: 'system', content: persona}, ...past], null, run);
   const thinking = String(reply.reasoning || (String(reply.content || '').match(/<think>([\s\S]*?)(<\/think>|$)/i) || [])[1] || '').trim();
   return {content: dropThinking(reply.content), tools: [], thinking: thinking.slice(-4000)};
 };
@@ -302,10 +306,10 @@ export const runTeam = async ({task, project, mode, planner, workers, lead, maxA
   say({type: 'team-start', planner: {id: 'planner', route: routeLabel(plannerRoute), kind: plannerRoute.kind}, lead: {id: 'lead', route: routeLabel(leadRoute), kind: leadRoute.kind}});
   say({type: 'team-agent', id: 'planner', status: 'thinking'});
 
-  const planReply = await withSlot(plannerRoute, () => askRoute(plannerRoute, [
+  const planReply = await askRoute(plannerRoute, [
     {role: 'system', content: `You are the planner of a multi-agent team. ${MODE_PLAN[kind]}\nProject: ${cleanText(project) || 'none'}.\nReturn ONLY a JSON array (at most ${most} items) of {"role": short name, "goal": one concrete instruction for that agent}. No prose, just the JSON array.`},
     {role: 'user', content: cleanTask}
-  ], null, run));
+  ], null, run);
 
   let plan = parsePlan(planReply.content, most);
 
@@ -324,7 +328,7 @@ export const runTeam = async ({task, project, mode, planner, workers, lead, maxA
     say({type: 'team-message', from: 'planner', to: item.id, text: item.goal});
   }
 
-  const results = await Promise.all(agents.map(item => withSlot(item.route, async () => {
+  const results = await Promise.all(agents.map(item => (async () => {
     say({type: 'team-agent', id: item.id, status: 'working'});
     const startedAt = Date.now();
 
@@ -346,14 +350,14 @@ export const runTeam = async ({task, project, mode, planner, workers, lead, maxA
       say({type: 'team-agent', id: item.id, status: 'error', error: message});
       return {id: item.id, name: item.role, role: item.role, answer: `error: ${message}`, tools: [], route: routeLabel(item.route)};
     }
-  })));
+  })()));
 
   say({type: 'team-agent', id: 'lead', status: 'thinking'});
   const findings = results.map((item, i) => `### Agent ${i + 1} - ${item.role} (${item.route})\n${String(item.answer || '').slice(0, 4000)}`).join('\n\n');
-  const final = await withSlot(leadRoute, () => askRoute(leadRoute, [
+  const final = await askRoute(leadRoute, [
     {role: 'system', content: 'You are the lead of a multi-agent team. Merge the findings of the agents into ONE clear, concrete answer for the user, in the language of the task. Remove duplicates, resolve contradictions, give the conclusion and the next steps. If it was a build task, present the assembled code so it can be applied.'},
     {role: 'user', content: `TASK: ${cleanTask}\n\nAGENT FINDINGS:\n${findings}`}
-  ], null, run));
+  ], null, run);
   say({type: 'team-agent', id: 'lead', status: 'done'});
   say({type: 'team-final', answer: final.content || ''});
 
